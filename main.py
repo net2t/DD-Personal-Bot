@@ -88,8 +88,13 @@ class Config:
     POST_COOLDOWN_SECONDS = int(os.getenv("DD_POST_COOLDOWN_SECONDS", "120") or "120")
     POST_RETRY_FAILED = os.getenv("DD_POST_RETRY_FAILED", "1") == "1"
     POST_MAX_ATTEMPTS = int(os.getenv("DD_POST_MAX_ATTEMPTS", "3") or "3")
-
     POPULATE_IMG_LINKS = os.getenv("DD_POPULATE_IMG_LINKS", "0") == "1"
+    POPULATE_IMG_LINKS_WRITE = os.getenv("DD_POPULATE_IMG_LINKS_WRITE", "0") == "1"
+
+    REKHTA_LISTING_URL = os.getenv("DD_REKHTA_LISTING_URL", "https://www.rekhta.org/shayari-image")
+    REKHTA_MAX_SCROLLS = int(os.getenv("DD_REKHTA_MAX_SCROLLS", "6") or "6")
+    REKHTA_POPULATE_WRITE = os.getenv("DD_REKHTA_POPULATE_WRITE", "0") == "1"
+    REKHTA_POPULATE_LIMIT = int(os.getenv("DD_REKHTA_POPULATE_LIMIT", "0") or "0")
 
     POST_DENIED_RETRIES = int(os.getenv("DD_POST_DENIED_RETRIES", "1") or "1")
     POST_DENIED_BACKOFF_SECONDS = int(os.getenv("DD_POST_DENIED_BACKOFF_SECONDS", "600") or "600")
@@ -435,8 +440,8 @@ class SheetsManager:
                 "MESSAGE", "STATUS", "NOTES", "RESULT URL"
             ],
             "PostQueue": [
-                "TYPE", "CONTENT", "IMAGE_PATH",
-                "STATUS", "POST_URL", "TIMESTAMP", "NOTES"
+                "STATUS", "TITLE", "TITLE_UR", "IMAGE_PATH", "TYPE",
+                "POST_URL", "TIMESTAMP", "NOTES", "SIGNATURE"
             ],
             "InboxQueue": [
                 "NICK", "NAME", "LAST_MSG", "MY_REPLY", "STATUS",
@@ -477,6 +482,44 @@ class SheetsManager:
         except Exception as e:
             self.logger.error(f"Failed to create sheet '{sheet_name}': {e}")
             return None
+
+    def ensure_postqueue_headers(self, sheet) -> bool:
+        """Ensure PostQueue has required headers; append missing columns if needed."""
+        required = [
+            "STATUS", "TITLE", "TITLE_UR", "IMAGE_PATH", "TYPE",
+            "POST_URL", "TIMESTAMP", "NOTES", "SIGNATURE"
+        ]
+        try:
+            headers = sheet.row_values(1)
+        except Exception as e:
+            self.logger.error(f"Failed to read PostQueue headers: {e}")
+            return False
+
+        if not headers:
+            try:
+                sheet.insert_row(required, 1)
+                self._format_headers(sheet, len(required))
+                self.logger.success("PostQueue headers inserted")
+                return True
+            except Exception as e:
+                self.logger.error(f"Failed to insert PostQueue headers: {e}")
+                return False
+
+        upper_headers = [(h or "").strip().upper() for h in headers]
+        missing = [h for h in required if h not in upper_headers]
+        if not missing:
+            return True
+
+        new_headers = headers + missing
+        try:
+            end_cell = rowcol_to_a1(1, len(new_headers))
+            sheet.update(values=[new_headers], range_name=f"A1:{end_cell}")
+            self._format_headers(sheet, len(new_headers))
+            self.logger.success(f"PostQueue headers updated (added: {', '.join(missing)})")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to update PostQueue headers: {e}")
+            return False
 
     def _format_headers(self, sheet, col_count: int):
         """Freeze header row and apply basic formatting."""
@@ -1191,6 +1234,436 @@ class PostCreator:
             pass
         return ProfileScraper.clean_url(self.driver.current_url)
 
+    def create_text_post(self, title: str, content: str, tags: str = "") -> Dict:
+        """Create a text post"""
+        try:
+            self.logger.info("Creating text post...")
+            self.driver.get(f"{Config.BASE_URL}/share/text/")
+            time.sleep(3)
+
+            form = self._find_share_form(require_file=False)
+            if not form:
+                self.logger.error("Text post form not found")
+                return {"status": "Form Error", "url": ""}
+
+            title_input = None
+            try:
+                title_input = form.find_element(
+                    By.CSS_SELECTOR,
+                    "input[name='title'], #id_title, input[name='heading'], input[name='subject']"
+                )
+            except Exception:
+                title_input = None
+
+            content_area = form.find_element(
+                By.CSS_SELECTOR,
+                "textarea[name='text'], #id_text, textarea[name='content'], #id_content, textarea"
+            )
+
+            submit_btn = form.find_element(
+                By.CSS_SELECTOR,
+                "button[type='submit'], input[type='submit'], button.btn-primary, button.btn"
+            )
+
+            if title_input and title:
+                title = self._strip_non_bmp(title)
+                try:
+                    title_input.clear()
+                except Exception:
+                    pass
+                title_input.send_keys(title)
+                time.sleep(0.5)
+
+            content = self._strip_non_bmp(content)
+            try:
+                content_area.clear()
+            except Exception:
+                pass
+            content_area.send_keys(content)
+            time.sleep(0.5)
+
+            if tags:
+                try:
+                    tags = self._sanitize_tags(tags)
+                    tags_input = form.find_element(By.CSS_SELECTOR, "input[name='tags'], #id_tags")
+                    try:
+                        tags_input.clear()
+                    except Exception:
+                        pass
+                    tags_input.send_keys(tags)
+                except Exception:
+                    pass
+
+            self.logger.info("Submitting text post...")
+            self.driver.execute_script("arguments[0].click();", submit_btn)
+            try:
+                WebDriverWait(self.driver, 10).until(lambda d: d.current_url != f"{Config.BASE_URL}/share/text/")
+            except TimeoutException:
+                pass
+            time.sleep(2)
+
+            post_url = self._extract_post_url()
+            if self._is_denied_or_share_url(post_url):
+                self.logger.error(f"Text post denied (url={post_url})")
+                return {"status": "Denied", "url": post_url}
+
+            if "damadam.pk" in post_url and "/comments/text/" in post_url:
+                self.logger.success(f"Text post created: {post_url}")
+                return {"status": "Posted", "url": post_url}
+
+            self.logger.warning(f"Post submitted but URL unclear (url={post_url})")
+            return {"status": "Pending Verification", "url": post_url}
+
+        except Exception as e:
+            self.logger.error(f"Text post error: {e}")
+            return {"status": f"Error: {str(e)[:50]}", "url": ""}
+
+    def create_image_post(self, image_path: str, title: str = "", content: str = "", tags: str = "") -> Dict:
+        """Create an image post from local file or remote URL (download to temp)."""
+        try:
+            self.logger.info("Creating image post...")
+
+            temp_file = ""
+            is_temp = False
+            try:
+                resolved_path, is_temp = self._resolve_image_to_local_path(image_path)
+                if is_temp:
+                    temp_file = resolved_path
+                image_path = resolved_path
+            except Exception as e:
+                self.logger.error(f"Image download failed: {e}")
+                return {"status": "Image Download Failed", "url": ""}
+
+            if not os.path.exists(image_path):
+                self.logger.error(f"Image not found: {image_path}")
+                return {"status": "File Not Found", "url": ""}
+
+            self.driver.get(f"{Config.BASE_URL}/share/photo/upload/")
+            time.sleep(3)
+
+            form = self._find_share_form(require_file=True)
+            if not form:
+                self.logger.error("Image upload form not found")
+                return {"status": "Form Error", "url": ""}
+
+            file_input = form.find_element(
+                By.CSS_SELECTOR,
+                "input[type='file'], input[name='file'], input[name='image']"
+            )
+
+            abs_path = os.path.abspath(image_path)
+            file_input.send_keys(abs_path)
+            try:
+                WebDriverWait(self.driver, 15).until(
+                    lambda d: bool((file_input.get_attribute("value") or "").strip())
+                )
+            except Exception:
+                pass
+            time.sleep(2)
+
+            caption = content or title
+            caption = self._sanitize_caption(caption)
+            if caption:
+                try:
+                    caption = self._strip_non_bmp(caption)
+                    caption_area = form.find_element(By.CSS_SELECTOR, "textarea")
+                    try:
+                        caption_area.clear()
+                    except Exception:
+                        pass
+                    caption_area.send_keys(caption)
+                except Exception:
+                    pass
+
+            self._select_radio_option(form=form, name="exp", value="i", label_text="Never expire post")
+            self._select_radio_option(form=form, name="com", value="0", label_text="Yes")
+
+            if title:
+                try:
+                    title = self._strip_non_bmp(title)
+                    title_input = form.find_element(By.CSS_SELECTOR, "input[name='title'], #id_title")
+                    try:
+                        title_input.clear()
+                    except Exception:
+                        pass
+                    title_input.send_keys(title)
+                except Exception:
+                    pass
+
+            if tags:
+                try:
+                    tags = self._sanitize_tags(tags)
+                    tags_input = form.find_element(By.CSS_SELECTOR, "input[name='tags'], #id_tags")
+                    try:
+                        tags_input.clear()
+                    except Exception:
+                        pass
+                    tags_input.send_keys(tags)
+                except Exception:
+                    pass
+
+            submit_btn = form.find_element(
+                By.CSS_SELECTOR,
+                "button[type='submit'], input[type='submit'], button.btn-primary"
+            )
+            self.logger.info("Submitting image post...")
+            self.driver.execute_script("arguments[0].click();", submit_btn)
+            try:
+                WebDriverWait(self.driver, 15).until(
+                    lambda d: d.current_url != f"{Config.BASE_URL}/share/photo/upload/"
+                )
+            except TimeoutException:
+                pass
+            time.sleep(2)
+
+            post_url = self._extract_post_url()
+            if self._is_denied_or_share_url(post_url):
+                self.logger.error(f"Image post denied (url={post_url})")
+                return {"status": "Denied", "url": post_url}
+
+            if "damadam.pk" in post_url and ("/comments/image/" in post_url or "/content/" in post_url):
+                self.logger.success(f"Image post created: {post_url}")
+                return {"status": "Posted", "url": post_url}
+
+            self.logger.warning(f"Post submitted but URL unclear (url={post_url})")
+            return {"status": "Pending Verification", "url": post_url}
+
+        except Exception as e:
+            self.logger.error(f"Image post error: {e}")
+            return {"status": f"Error: {str(e)[:50]}", "url": ""}
+        finally:
+            try:
+                if 'temp_file' in locals() and temp_file and os.path.exists(temp_file):
+                    os.unlink(temp_file)
+            except Exception:
+                pass
+
+    def _download_url_to_temp(self, url: str) -> str:
+        last_err = None
+        tries = max(1, int(Config.IMAGE_DOWNLOAD_RETRIES))
+        for attempt in range(1, tries + 1):
+            tmp_path = ""
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=int(Config.IMAGE_DOWNLOAD_TIMEOUT_SECONDS)) as resp:
+                    content_type = resp.headers.get("Content-Type", "")
+                    suffix = PostQueueLinkPopulator._guess_suffix(url, content_type)
+                    tmp = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+                    tmp_path = tmp.name
+                    try:
+                        while True:
+                            chunk = resp.read(1024 * 64)
+                            if not chunk:
+                                break
+                            tmp.write(chunk)
+                    finally:
+                        tmp.close()
+
+                if os.path.getsize(tmp_path) < 1024:
+                    try:
+                        with open(tmp_path, "rb") as f:
+                            head = f.read(512).lower()
+                        if b"<html" in head or b"<!doctype html" in head:
+                            try:
+                                os.unlink(tmp_path)
+                            except Exception:
+                                pass
+                            raise ValueError("Downloaded HTML instead of image")
+                    except Exception:
+                        pass
+
+                return tmp_path
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+                last_err = e
+                try:
+                    if tmp_path and os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                except Exception:
+                    pass
+                if attempt < tries:
+                    time.sleep(max(1, int(Config.IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS)) * attempt)
+                    continue
+                raise
+            except Exception as e:
+                last_err = e
+                try:
+                    if tmp_path and os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                except Exception:
+                    pass
+                raise
+
+        raise last_err if last_err else ValueError("Download failed")
+
+    def _download_drive_file_to_temp(self, file_id: str) -> str:
+        if not file_id:
+            raise ValueError("Missing Drive file id")
+
+        url = f"https://drive.google.com/uc?export=download&id={file_id}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+
+        last_err = None
+        tries = max(1, int(Config.IMAGE_DOWNLOAD_RETRIES))
+        for attempt in range(1, tries + 1):
+            try:
+                with urllib.request.urlopen(req, timeout=int(Config.IMAGE_DOWNLOAD_TIMEOUT_SECONDS)) as resp:
+                    content_type = resp.headers.get("Content-Type", "")
+
+                    if (content_type or "").lower().startswith("text/html"):
+                        html = resp.read(1024 * 1024).decode("utf-8", errors="ignore")
+                        token_match = re.search(r"confirm=([0-9A-Za-z_]+)", html)
+                        token = token_match.group(1) if token_match else ""
+
+                        cookie = resp.headers.get("Set-Cookie", "")
+                        if token:
+                            url2 = f"https://drive.google.com/uc?export=download&confirm={token}&id={file_id}"
+                            headers = {"User-Agent": "Mozilla/5.0"}
+                            if cookie:
+                                headers["Cookie"] = cookie
+                            req2 = urllib.request.Request(url2, headers=headers)
+                            return self._download_url_to_temp(req2.full_url)
+
+                        raise ValueError("Drive download returned HTML")
+
+                return self._download_url_to_temp(url)
+
+            except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+                last_err = e
+                if attempt < tries:
+                    time.sleep(max(1, int(Config.IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS)) * attempt)
+                    continue
+                raise
+
+        raise last_err if last_err else ValueError("Drive download failed")
+
+    @staticmethod
+    def _extract_drive_file_id(value: str) -> str:
+        if not value:
+            return ""
+
+        s = value.strip()
+        m = re.search(r"/file/d/([^/]+)", s)
+        if m:
+            return m.group(1)
+
+        try:
+            parsed = urlparse(s)
+            if parsed.scheme in {"http", "https"}:
+                qs = parse_qs(parsed.query)
+                if "id" in qs and qs["id"]:
+                    return qs["id"][0]
+        except Exception:
+            pass
+
+        if re.fullmatch(r"[A-Za-z0-9_-]{10,}", s):
+            return s
+
+        return ""
+
+    @staticmethod
+    def _is_http_url(value: str) -> bool:
+        if not value:
+            return False
+        try:
+            u = urlparse(value.strip())
+            return u.scheme in {"http", "https"}
+        except Exception:
+            return False
+
+    def _resolve_image_to_local_path(self, image_path: str) -> (str, bool):
+        p = (image_path or "").strip()
+        if not p:
+            return "", False
+
+        if os.path.exists(p):
+            return os.path.abspath(p), False
+
+        drive_id = self._extract_drive_file_id(p)
+        if drive_id and ("drive.google.com" in p or "/file/d/" in p or p == drive_id):
+            tmp_path = self._download_drive_file_to_temp(drive_id)
+            return tmp_path, True
+
+        if self._is_http_url(p):
+            tmp_path = self._download_url_to_temp(p)
+            return tmp_path, True
+
+        return p, False
+
+    def _select_radio_option(
+        self,
+        form,
+        name: str,
+        value: str,
+        label_text: str,
+        timeout_seconds: int = 5
+    ) -> bool:
+        try:
+            target = None
+            radios = form.find_elements(
+                By.CSS_SELECTOR,
+                f"input[type='radio'][name='{name}'][value='{value}']"
+            )
+            if radios:
+                target = radios[0]
+            else:
+                try:
+                    label = form.find_element(By.XPATH, f".//label[normalize-space()='{label_text}']")
+                    for_attr = (label.get_attribute("for") or "").strip()
+                    if for_attr:
+                        target = form.find_element(By.ID, for_attr)
+                    else:
+                        target = label
+                except Exception:
+                    return False
+
+            self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", target)
+            self.driver.execute_script("arguments[0].click();", target)
+
+            WebDriverWait(self.driver, timeout_seconds).until(
+                lambda d: any(
+                    r.is_selected()
+                    for r in form.find_elements(
+                        By.CSS_SELECTOR,
+                        f"input[type='radio'][name='{name}'][value='{value}']"
+                    )
+                )
+            )
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _collapse_repeats(text: str, max_run: int) -> str:
+        if not text:
+            return ""
+        try:
+            n = max(2, int(max_run))
+            return re.sub(r"(.)\\1{" + str(n) + r",}", lambda m: m.group(1) * n, text)
+        except Exception:
+            return text
+
+    @classmethod
+    def _sanitize_caption(cls, caption: str) -> str:
+        c = (caption or "").strip()
+        if not c:
+            return ""
+        c = cls._collapse_repeats(c, Config.POST_MAX_REPEAT_CHARS)
+        max_len = max(1, int(Config.POST_CAPTION_MAX_LEN))
+        if len(c) > max_len:
+            c = c[:max_len]
+        return c
+
+    @classmethod
+    def _sanitize_tags(cls, tags: str) -> str:
+        t = (tags or "").strip()
+        if not t:
+            return ""
+        t = cls._collapse_repeats(t, Config.POST_MAX_REPEAT_CHARS)
+        max_len = max(1, int(Config.POST_TAGS_MAX_LEN))
+        if len(t) > max_len:
+            t = t[:max_len]
+        return t
+
     @staticmethod
     def _is_denied_or_share_url(url: str) -> bool:
         u = (url or "").strip().lower()
@@ -1276,49 +1749,200 @@ class PostQueueLinkPopulator:
         self.driver = driver
         self.logger = logger
 
-    def _extract_image_url(self) -> str:
+    @staticmethod
+    def _clean_text(s: str) -> str:
+        return re.sub(r"\s+", " ", (s or "").strip())
+
+    @staticmethod
+    def _is_http_url(value: str) -> bool:
+        if not value:
+            return False
         try:
-            meta = self.driver.find_elements(By.XPATH, "//meta[@property='og:image']")
-            if meta:
-                url = (meta[0].get_attribute("content") or "").strip()
-                if url:
-                    return url
+            u = urlparse(value.strip())
+            return u.scheme in {"http", "https"}
         except Exception:
-            pass
+            return False
 
-        selectors = [
-            "div.sherContent img",
-            "img[alt*='sher']",
-            "img[src*='rekhta']",
-            "img",
-        ]
-        for sel in selectors:
+    def _get_first_attr(self, css: str, attr: str) -> str:
+        try:
+            el = self.driver.find_elements(By.CSS_SELECTOR, css)
+            if not el:
+                return ""
+            return (el[0].get_attribute(attr) or "").strip()
+        except Exception:
+            return ""
+
+    def _extract_rekhta_image_payload(self) -> Dict[str, str]:
+        """Extract minimal fields for PostQueue from a Rekhta shayari-image detail page.
+
+        Returns dict with keys: img_url, title, poet
+        """
+        img_url = ""
+        title = ""
+        poet = ""
+
+        # 1) Image URL: share widget has a direct PNG in data-mediasrc
+        img_url = self._get_first_attr("div.shareSocial", "data-mediasrc")
+
+        # 2) Fallback: image inside card (often uses data-src)
+        if not img_url:
             try:
-                imgs = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                imgs = self.driver.find_elements(By.CSS_SELECTOR, "div.shyriImgBox img")
                 for img in imgs[:10]:
-                    src = (img.get_attribute("src") or "").strip()
-                    if src.startswith("http"):
-                        return src
+                    candidate = (img.get_attribute("data-src") or "").strip()
+                    if not candidate:
+                        candidate = (img.get_attribute("src") or "").strip()
+                    if self._is_http_url(candidate) and "rekhta.org/Images/ShayariImages/" in candidate:
+                        img_url = candidate
+                        break
             except Exception:
-                continue
-        return ""
+                pass
 
-    def populate(self, sheet, header_map: Dict[str, int], max_rows: int = 0) -> int:
+        # 3) Fallback: og:image
+        if not img_url:
+            try:
+                meta = self.driver.find_elements(By.XPATH, "//meta[@property='og:image']")
+                if meta:
+                    candidate = (meta[0].get_attribute("content") or "").strip()
+                    if self._is_http_url(candidate):
+                        img_url = candidate
+            except Exception:
+                pass
+
+        # Title line
+        try:
+            t = ""
+            els = self.driver.find_elements(By.CSS_SELECTOR, "p.shyriImgLine a")
+            if els:
+                t = els[0].text
+            title = self._clean_text(t)
+        except Exception:
+            title = ""
+
+        # Poet
+        try:
+            p = ""
+            els = self.driver.find_elements(By.CSS_SELECTOR, "h4.shyriImgPoetName a")
+            if els:
+                p = els[0].text
+            poet = self._clean_text(p)
+        except Exception:
+            poet = ""
+
+        return {"img_url": img_url, "title": title, "poet": poet}
+
+    def collect_rekhta_listing(self, listing_url: str, max_scrolls: int = 6) -> List[Dict[str, str]]:
+        items: List[Dict[str, str]] = []
+        seen: set = set()
+
+        if not self.driver:
+            return items
+
+        try:
+            self.driver.get(listing_url)
+            time.sleep(2)
+        except Exception:
+            return items
+
+        last_count = 0
+        stable_rounds = 0
+        max_scrolls = max(1, int(max_scrolls))
+
+        for _ in range(max_scrolls):
+            cards = []
+            try:
+                cards = self.driver.find_elements(By.CSS_SELECTOR, "div.shyriImgBox")
+            except Exception:
+                cards = []
+
+            for card in cards:
+                try:
+                    img_link = ""
+                    ghazal_link = ""
+                    title = ""
+                    poet = ""
+                    listing_img = ""
+
+                    try:
+                        img_link = (card.find_element(By.CSS_SELECTOR, "a.shyriImgInner").get_attribute("href") or "").strip()
+                    except Exception:
+                        img_link = ""
+
+                    if not img_link or not self._is_http_url(img_link) or img_link in seen:
+                        continue
+
+                    try:
+                        ghazal_link = (card.find_element(By.CSS_SELECTOR, "p.shyriImgLine a").get_attribute("href") or "").strip()
+                    except Exception:
+                        ghazal_link = ""
+
+                    try:
+                        title = card.find_element(By.CSS_SELECTOR, "p.shyriImgLine a").text
+                        title = self._clean_text(title)
+                    except Exception:
+                        title = ""
+
+                    try:
+                        poet = card.find_element(By.CSS_SELECTOR, "h4.shyriImgPoetName a").text
+                        poet = self._clean_text(poet)
+                    except Exception:
+                        poet = ""
+
+                    try:
+                        listing_img = (card.find_element(By.CSS_SELECTOR, "div.shareSocial").get_attribute("data-mediasrc") or "").strip()
+                    except Exception:
+                        listing_img = ""
+
+                    items.append({
+                        "image_url": img_link,
+                        "ghazal_url": ghazal_link,
+                        "title": title,
+                        "poet": poet,
+                        "listing_img": listing_img
+                    })
+                    seen.add(img_link)
+                except Exception:
+                    continue
+
+            if len(items) == last_count:
+                stable_rounds += 1
+            else:
+                stable_rounds = 0
+            last_count = len(items)
+
+            try:
+                self.driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+                time.sleep(2)
+            except Exception:
+                pass
+
+            if stable_rounds >= 2:
+                break
+
+        return items
+
+    def populate(self, sheet, header_map: Dict[str, int], max_rows: int = 0, preview_only: bool = False) -> int:
         if not self.driver:
             return 0
 
         src_col_idx = None
-        tgt_col_idx = None
+        tgt_img_col_idx = None
+        tgt_title_ur_col_idx = None
+        tgt_title_en_col_idx = None
         for k, v in header_map.items():
             if k in {"POST_LINK", "SOURCE_URL", "SOURCE", "POST_LINK_", "POST LIN"}:
                 src_col_idx = v + 1
             if k in {"IMG_LINK", "IMAGE_PATH", "IMAGE", "IMAGE_URL"}:
-                tgt_col_idx = v + 1
+                tgt_img_col_idx = v + 1
+            if k in {"TITLE_UR", "TITLE UR", "CAPTION"}:
+                tgt_title_ur_col_idx = v + 1
+            if k in {"TITLE_EN", "TITLE EN", "TITLE_ENG", "TITLE", "TITLE_ENG"}:
+                tgt_title_en_col_idx = v + 1
 
         if not src_col_idx:
             self.logger.warning("PostQueue populate skipped: source column (POST_LINK) not found")
             return 0
-        if not tgt_col_idx:
+        if not tgt_img_col_idx:
             self.logger.warning("PostQueue populate skipped: target column (IMG_LINK) not found")
             return 0
 
@@ -1329,21 +1953,47 @@ class PostQueueLinkPopulator:
                 break
 
             source_url = (row[src_col_idx - 1] if len(row) >= src_col_idx else "").strip()
-            current_target = (row[tgt_col_idx - 1] if len(row) >= tgt_col_idx else "").strip()
-            if not source_url or current_target:
+            current_img = (row[tgt_img_col_idx - 1] if len(row) >= tgt_img_col_idx else "").strip()
+            if not source_url or current_img:
+                continue
+
+            if not self._is_http_url(source_url):
                 continue
 
             try:
-                self.logger.debug(f"Populate IMG_LINK row={r_i}")
+                self.logger.debug(f"Populate Rekhta row={r_i}")
                 self.driver.get(source_url)
                 time.sleep(2)
-                img_url = self._extract_image_url()
+
+                payload = self._extract_rekhta_image_payload()
+                img_url = (payload.get("img_url") or "").strip()
+                title = (payload.get("title") or "").strip()
+                poet = (payload.get("poet") or "").strip()
+
+                caption = title
+                if poet:
+                    caption = f"{caption} — by {poet}" if caption else f"by {poet}"
+
+                # Preview first: user wants to confirm layout/data before writing sheet
+                self.logger.info(
+                    f"Rekhta data row={r_i} | img_url={(img_url or 'N/A')[:120]} | title={(title or 'N/A')[:80]} | poet={(poet or 'N/A')[:80]}"
+                )
+
+                if preview_only:
+                    updated += 1
+                    continue
+
                 if img_url:
-                    sheet.update_cell(r_i, tgt_col_idx, img_url)
-                    updated += 1
+                    sheet.update_cell(r_i, tgt_img_col_idx, img_url)
                 else:
-                    sheet.update_cell(r_i, tgt_col_idx, "IMAGE_NOT_FOUND")
-                    updated += 1
+                    sheet.update_cell(r_i, tgt_img_col_idx, "IMAGE_NOT_FOUND")
+
+                if tgt_title_ur_col_idx and caption:
+                    sheet.update_cell(r_i, tgt_title_ur_col_idx, caption)
+                if tgt_title_en_col_idx and title:
+                    sheet.update_cell(r_i, tgt_title_en_col_idx, title)
+
+                updated += 1
                 time.sleep(1)
             except Exception as e:
                 self.logger.warning(f"Populate IMG_LINK failed row={r_i}: {str(e)[:120]}")
@@ -1619,6 +2269,10 @@ class PostQueueLinkPopulator:
 
     def create_image_post(self, image_path: str, title: str = "", content: str = "", tags: str = "") -> Dict:
         """Create an image post from local file"""
+        return self._create_image_post_impl(image_path=image_path, title=title, content=content, tags=tags)
+
+    def _create_image_post_impl(self, image_path: str, title: str = "", content: str = "", tags: str = "") -> Dict:
+        """Implementation for image post creation."""
         try:
             self.logger.info("Creating image post...")
 
@@ -2317,6 +2971,199 @@ def run_message_mode(args):
         browser_mgr.close()
 
 # ============================================================================
+# PHASE 1.5: REKHTA POPULATE MODE
+# ============================================================================
+
+def run_populate_mode(args):
+    """Populate PostQueue from Rekhta shayari-image listing."""
+    logger = Logger("populate")
+    try:
+        console.print(
+            Panel.fit(
+                f"DamaDam Bot V{VERSION} - POPULATE MODE",
+                title="POPULATE",
+                border_style="cyan",
+            )
+        )
+    except Exception:
+        logger.info("=" * 70)
+        logger.info(f"DamaDam Bot V{VERSION} - POPULATE MODE")
+        logger.info("=" * 70 + "\n")
+
+    browser_mgr = BrowserManager(logger)
+    driver = browser_mgr.setup()
+    if not driver:
+        return
+
+    try:
+        sheets_mgr = SheetsManager(logger)
+        if not sheets_mgr.connect():
+            return
+
+        post_queue = sheets_mgr.get_sheet(Config.SHEET_ID, "PostQueue")
+        if not post_queue:
+            return
+
+        if not sheets_mgr.ensure_postqueue_headers(post_queue):
+            return
+
+        sheets_mgr.api_calls += 1
+        all_rows = post_queue.get_all_values()
+
+        headers = all_rows[0] if all_rows else []
+        if not headers:
+            logger.warning("PostQueue headers missing. Please add header row first.")
+            return
+
+        header_map: Dict[str, int] = {}
+        for idx, h in enumerate(headers):
+            key = (h or "").strip().upper()
+            if key and key not in header_map:
+                header_map[key] = idx
+
+        def find_col(*keys: str) -> Optional[int]:
+            for k in keys:
+                kk = (k or "").strip().upper()
+                if kk in header_map:
+                    return header_map[kk]
+            return None
+
+        col_status = find_col("STATUS", "STATU")
+        col_title = find_col("TITLE", "TITLE_EN", "TITLE EN", "TITLE_ENG")
+        col_title_ur = find_col("TITLE_UR", "TITLE UR", "CAPTION")
+        col_image_path = find_col("IMAGE_PATH", "IMG_LINK", "IMAGE", "IMAGE_URL")
+        col_type = find_col("TYPE")
+        col_timestamp = find_col("TIMESTAMP", "TIME")
+        col_notes = find_col("NOTES", "NOTE")
+        col_signature = find_col("SIGNATURE")
+
+        if col_image_path is None or col_title is None:
+            logger.warning("PostQueue needs IMAGE_PATH and TITLE columns to populate.")
+            return
+
+        existing_links = set()
+        if col_image_path is not None:
+            for row in all_rows[1:]:
+                if len(row) > col_image_path and row[col_image_path].strip():
+                    existing_links.add(row[col_image_path].strip().lower())
+
+        listing_url = (Config.REKHTA_LISTING_URL or "").strip()
+        if not listing_url:
+            logger.warning("Rekhta listing URL missing (DD_REKHTA_LISTING_URL).")
+            return
+
+        pop = PostQueueLinkPopulator(driver, logger)
+        logger.info(f"Opening Rekhta listing: {listing_url}")
+        items = pop.collect_rekhta_listing(listing_url, Config.REKHTA_MAX_SCROLLS)
+        if not items:
+            logger.warning("No Rekhta items found on listing.")
+            return
+
+        limit = 0
+        if Config.REKHTA_POPULATE_LIMIT > 0:
+            limit = Config.REKHTA_POPULATE_LIMIT
+        elif Config.MAX_PROFILES > 0:
+            limit = Config.MAX_PROFILES
+        if limit > 0:
+            items = items[:limit]
+
+        preview_only = not (Config.REKHTA_POPULATE_WRITE or getattr(args, "populate_write", False))
+        if preview_only:
+            logger.info("Preview mode ON (no sheet updates). Set DD_REKHTA_POPULATE_WRITE=1 to write.")
+
+        total = len(items)
+        added = 0
+        skipped = 0
+        seen_links = set(existing_links)
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("{task.description}"),
+            BarColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            task = progress.add_task("Rekhta items", total=total)
+            try:
+                for idx, item in enumerate(items, 1):
+                    progress.update(task, advance=1, description=f"[{idx}/{total}] Rekhta")
+                    source_url = (item.get("image_url") or "").strip()
+                    if not source_url or not pop._is_http_url(source_url):
+                        skipped += 1
+                        continue
+                    src_key = source_url.lower()
+                    if src_key in seen_links:
+                        skipped += 1
+                        continue
+
+                    try:
+                        driver.get(source_url)
+                        time.sleep(2)
+                    except Exception:
+                        skipped += 1
+                        continue
+
+                    payload = pop._extract_rekhta_image_payload()
+                    img_url = (payload.get("img_url") or item.get("listing_img") or "").strip()
+                    title = (payload.get("title") or item.get("title") or "").strip()
+                    poet = (payload.get("poet") or item.get("poet") or "").strip()
+
+                    caption = title
+                    if poet:
+                        caption = f"{caption} — by {poet}" if caption else f"by {poet}"
+
+                    logger.info(
+                        f"Rekhta data {idx}/{total} | img_url={(img_url or 'N/A')[:120]} | title={(title or 'N/A')[:80]} | poet={(poet or 'N/A')[:80]}"
+                    )
+
+                    if preview_only:
+                        added += 1
+                        seen_links.add(src_key)
+                        if limit > 0 and added >= limit:
+                            break
+                        continue
+
+                    row = ["" for _ in range(len(headers))]
+                    if col_status is not None:
+                        row[col_status] = "pending"
+                    if col_title is not None and title:
+                        row[col_title] = title
+                    if col_title_ur is not None and caption:
+                        row[col_title_ur] = caption
+                    if col_image_path is not None:
+                        row[col_image_path] = img_url or "IMAGE_NOT_FOUND"
+                    if col_type is not None:
+                        row[col_type] = "image"
+                    if col_timestamp is not None:
+                        row[col_timestamp] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    if col_notes is not None:
+                        row[col_notes] = "rekhta"
+                    if col_signature is not None:
+                        row[col_signature] = ""
+
+                    sheets_mgr.append_row(post_queue, row)
+                    seen_links.add(src_key)
+                    added += 1
+                    if limit > 0 and added >= limit:
+                        break
+            except KeyboardInterrupt:
+                logger.warning("\n⚠️ Interrupted by user")
+
+        logger.info("\n" + "=" * 70)
+        if preview_only:
+            logger.success(f"✅ Previewed: {added}/{total}")
+        else:
+            logger.success(f"✅ Added: {added}/{total}")
+        if skipped:
+            logger.warning(f"⚠️ Skipped: {skipped}")
+        logger.info(f"📞 API Calls: {sheets_mgr.api_calls}")
+        logger.info(f"📝 Log: {logger.log_file}")
+        logger.info("=" * 70 + "\n")
+
+    finally:
+        browser_mgr.close()
+
+# ============================================================================
 # PHASE 2: POST MODE
 # ============================================================================
 
@@ -2357,6 +3204,9 @@ def run_post_mode(args):
         if not post_queue:
             return
 
+        if not sheets_mgr.ensure_postqueue_headers(post_queue):
+            return
+
         logger.info("📋 Loading pending posts...")
         sheets_mgr.api_calls += 1
         all_rows = post_queue.get_all_values()
@@ -2371,11 +3221,15 @@ def run_post_mode(args):
         if getattr(args, "populate_img_links", False) or Config.POPULATE_IMG_LINKS:
             try:
                 pop = PostQueueLinkPopulator(driver, logger)
-                n = pop.populate(post_queue, header_map)
+                preview_only = not bool(Config.POPULATE_IMG_LINKS_WRITE)
+                n = pop.populate(post_queue, header_map, preview_only=preview_only)
                 if n:
-                    logger.info(f"Updated IMG_LINK for {n} rows")
-                    sheets_mgr.api_calls += 1
-                    all_rows = post_queue.get_all_values()
+                    if preview_only:
+                        logger.info(f"Previewed Rekhta data for {n} rows (no sheet updates)")
+                    else:
+                        logger.info(f"Updated PostQueue (IMG_LINK/title fields) for {n} rows")
+                        sheets_mgr.api_calls += 1
+                        all_rows = post_queue.get_all_values()
             except Exception as e:
                 logger.warning(f"IMG_LINK population skipped: {str(e)[:120]}")
 
@@ -2431,13 +3285,13 @@ def run_post_mode(args):
                 post_type = get_any(row, "TYPE").lower()
                 status = get_any(row, "STATUS", "STATU").lower()
 
-                title_en = get_any(row, "TITLE_EN", "TITLE_ENG", "TITLE EN", "TITLE")
+                title_en = get_any(row, "TITLE", "TITLE_EN", "TITLE_ENG", "TITLE EN")
                 title_ur = get_any(row, "TITLE_UR", "TITLE_URDU", "TITLE UR", "CAPTION")
-                img_link = get_any(row, "IMG_LINK", "IMAGE_PATH", "IMAGE", "IMAGE_URL")
+                img_link = get_any(row, "IMAGE_PATH", "IMG_LINK", "IMAGE", "IMAGE_URL")
 
                 # User-defined PostQueue rules:
-                # - TYPE=text: use column A (TITLE_EN) as content
-                # - TYPE=image + STATUS=pending: use column C (IMG_LINK) as image URL and column B (TITLE_UR) as caption
+                # - TYPE=text: use column TITLE as content
+                # - TYPE=image + STATUS=pending: use IMAGE_PATH as image URL and TITLE_UR as caption
                 if post_type == "text":
                     title = ""
                     content = title_en
@@ -2896,7 +3750,7 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["msg", "post", "inbox"],
+        choices=["msg", "populate", "post", "inbox"],
         default=None,
         help="Operation mode"
     )
@@ -2912,6 +3766,19 @@ def main():
         "--populate-img-links",
         action="store_true",
         help="Populate PostQueue IMG_LINK from POST_LINK when IMG_LINK is empty"
+    )
+
+    parser.add_argument(
+        "--populate-limit",
+        type=int,
+        default=None,
+        help="Limit Rekhta populate rows (0=all)"
+    )
+
+    parser.add_argument(
+        "--populate-write",
+        action="store_true",
+        help="Write Rekhta populate results to PostQueue (disable preview)"
     )
 
     parser.add_argument(
@@ -2948,31 +3815,57 @@ def main():
         console.print("\nSelect mode:")
         console.print("  1) Message Mode")
         console.print("  2) Post Mode")
-        console.print("  3) Inbox Mode")
-        console.print("  4) Populate IMG_LINK (PostQueue)")
+        console.print("  3) Inbox")
+        console.print("  4) Logs")
 
-        mode_map = {"1": "msg", "2": "post", "3": "inbox", "4": "populate"}
-        selected = _prompt_choice("Enter choice [1]: ", mode_map, "1")
-        if selected == "populate":
-            args.mode = "post"
-            args.populate_img_links = True
-            args.max_profiles = 0
+        main_map = {"1": "msg", "2": "post_menu", "3": "inbox_menu", "4": "logs"}
+        selected = _prompt_choice("Enter choice [1]: ", main_map, "1")
+
+        if selected == "post_menu":
+            console.print("\nPost Mode:")
+            console.print("  1) Populate")
+            console.print("  2) Post Start")
+            post_sel = _prompt_choice("Enter choice [1]: ", {"1": "populate", "2": "post"}, "1")
+            args.mode = post_sel
+
+            if args.mode == "populate":
+                # Smoke-test friendly default: 2
+                max_items = _prompt_int("How many items to populate? (default 2) [2]: ", 2)
+                if max_items <= 0:
+                    max_items = 2
+                args.populate_limit = max_items
+                try:
+                    yn = input("Write to PostQueue now? (Y/n): ").strip().lower()
+                except Exception:
+                    yn = ""
+                if yn not in {"n", "no", "0", "false"}:
+                    args.populate_write = True
+            else:
+                max_profiles = _prompt_int("How many posts? (0=all) [0]: ", 0)
+                args.max_profiles = max_profiles
+                if not args.populate_img_links:
+                    try:
+                        yn = input("Populate IMG_LINK from POST_LINK first? (y/N): ").strip().lower()
+                    except Exception:
+                        yn = ""
+                    if yn in {"y", "yes", "1", "true"}:
+                        args.populate_img_links = True
+
+        elif selected == "inbox_menu":
+            console.print("\nInbox:")
+            console.print("  1) Activity")
+            console.print("  2) InBox / Reply")
+            inbox_sel = _prompt_choice("Enter choice [2]: ", {"1": "activity", "2": "inbox"}, "2")
+            # Activity is logged throughout; keep it as a no-op placeholder for now.
+            args.mode = "inbox" if inbox_sel == "inbox" else "inbox"
+        elif selected == "logs":
+            args.mode = "logs"
         else:
-            args.mode = selected
+            args.mode = "msg"
 
-        if args.mode in {"msg", "post"}:
-            max_profiles = _prompt_int("How many profiles/posts? (0=all) [0]: ", 0)
+        if args.mode == "msg":
+            max_profiles = _prompt_int("How many profiles? (0=all) [0]: ", 0)
             args.max_profiles = max_profiles
-        else:
-            args.max_profiles = args.max_profiles
-
-        if args.mode == "post" and not args.populate_img_links:
-            try:
-                yn = input("Populate IMG_LINK from POST_LINK first? (y/N): ").strip().lower()
-            except Exception:
-                yn = ""
-            if yn in {"y", "yes", "1", "true"}:
-                args.populate_img_links = True
 
     if args.max_profiles is not None:
         try:
@@ -2981,13 +3874,24 @@ def main():
             mp = 0
         Config.MAX_PROFILES = 0 if mp <= 0 else mp
 
+    if args.populate_limit is not None:
+        try:
+            pl = int(args.populate_limit)
+        except Exception:
+            pl = 0
+        Config.REKHTA_POPULATE_LIMIT = 0 if pl <= 0 else pl
+
     try:
         if args.mode == "msg":
             run_message_mode(args)
+        elif args.mode == "populate":
+            run_populate_mode(args)
         elif args.mode == "post":
             run_post_mode(args)
         elif args.mode == "inbox":
             run_inbox_mode(args)
+        elif args.mode == "logs":
+            console.print(str(Config.LOG_DIR.resolve()))
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted[/yellow]")
     except Exception as e:

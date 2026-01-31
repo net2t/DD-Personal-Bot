@@ -14,6 +14,9 @@ chromedriver*.exe
 logs/
 *.log
 
+# Local screenshots
+Screenshot *.png
+
 # Local reference repos
 Reference_GithubRepos/
 
