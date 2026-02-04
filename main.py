@@ -3631,6 +3631,17 @@ def run_post_mode(args):
 
                         if result and (result.get("status") == "Denied"):
                             denied_url = (result.get("url") or "").strip()
+
+                            # If we hit the explicit upload-denied/share URL, stop immediately.
+                            # This is a strong signal the site is blocking uploads and retries waste time and add risk.
+                            if PostCreator._is_denied_or_share_url(denied_url) and "upload-denied" in denied_url.lower():
+                                logger.error(
+                                    "Uploads are currently denied by the site (upload-denied). "
+                                    "Stopping Post Mode early to avoid repeated retries."
+                                )
+                                stop_early = True
+                                break
+
                             if PostCreator._is_denied_or_share_url(denied_url) and denied_try < denied_retries:
                                 base_wait = max(0, int(Config.POST_DENIED_BACKOFF_SECONDS))
                                 try:
