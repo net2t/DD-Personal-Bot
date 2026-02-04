@@ -3168,11 +3168,10 @@ def run_populate_mode(args):
             BarColumn(),
             TimeElapsedColumn(),
             console=console,
-            force_terminal=True,
             markup=False,
             refresh_per_second=10,
         ) as progress:
-            task = progress.add_task("Rekhta items", total=total)
+            task = progress.add_task("Rekhta items", total=None)
             try:
                 for idx, item in enumerate(items, 1):
                     progress.update(task, advance=1, description=f"[{idx}/{total}] Rekhta")
@@ -3510,11 +3509,10 @@ def run_post_mode(args):
                     BarColumn(),
                     TimeElapsedColumn(),
                     console=console,
-                    force_terminal=True,
                     markup=False,
                     refresh_per_second=10,
                 ) as cd:
-                    t = cd.add_task(f"Cooldown {seconds}s", total=seconds)
+                    t = cd.add_task(f"Cooldown {seconds}s", total=None)
                     for _ in range(seconds):
                         time.sleep(1)
                         cd.advance(t, 1)
@@ -3537,13 +3535,11 @@ def run_post_mode(args):
                 return b
 
         with Progress(
-            SpinnerColumn(),
             TextColumn("{task.description}"),
             BarColumn(),
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
             console=console,
-            force_terminal=True,
             markup=False,
             refresh_per_second=10,
         ) as progress:
