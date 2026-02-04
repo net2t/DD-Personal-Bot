@@ -3164,11 +3164,10 @@ def run_populate_mode(args):
 
         with Progress(
             SpinnerColumn(),
-            TextColumn("{task.description}"),
+            TextColumn("{task.description}", markup=False),
             BarColumn(),
             TimeElapsedColumn(),
             console=console,
-            markup=False,
             refresh_per_second=10,
         ) as progress:
             task = progress.add_task("Rekhta items", total=None)
@@ -3505,11 +3504,10 @@ def run_post_mode(args):
             try:
                 with Progress(
                     SpinnerColumn(),
-                    TextColumn("{task.description}"),
+                    TextColumn("{task.description}", markup=False),
                     BarColumn(),
                     TimeElapsedColumn(),
                     console=console,
-                    markup=False,
                     refresh_per_second=10,
                 ) as cd:
                     t = cd.add_task(f"Cooldown {seconds}s", total=None)
@@ -3535,12 +3533,11 @@ def run_post_mode(args):
                 return b
 
         with Progress(
-            TextColumn("{task.description}"),
+            TextColumn("{task.description}", markup=False),
             BarColumn(),
-            TextColumn("{task.completed}/{task.total}"),
+            TextColumn("{task.completed}/{task.total}", markup=False),
             TimeElapsedColumn(),
             console=console,
-            markup=False,
             refresh_per_second=10,
         ) as progress:
             task_id = progress.add_task("Posting", total=len(pending))
