@@ -56,7 +56,13 @@ except Exception:
 
 load_dotenv(override=False)
 
-console = Console()
+_rich_force = os.getenv("DD_RICH_FORCE", "0").strip().lower() in {"1", "true", "yes", "y"}
+_rich_color = os.getenv("DD_RICH_COLOR_SYSTEM", "auto").strip() or "auto"
+
+console = Console(
+    force_terminal=_rich_force,
+    color_system=_rich_color,
+)
 VERSION = "2.0.0"
 
 def _sheet_url(sheet_id: str) -> str:
@@ -3162,6 +3168,9 @@ def run_populate_mode(args):
             BarColumn(),
             TimeElapsedColumn(),
             console=console,
+            force_terminal=True,
+            markup=False,
+            refresh_per_second=10,
         ) as progress:
             task = progress.add_task("Rekhta items", total=total)
             try:
@@ -3501,6 +3510,9 @@ def run_post_mode(args):
                     BarColumn(),
                     TimeElapsedColumn(),
                     console=console,
+                    force_terminal=True,
+                    markup=False,
+                    refresh_per_second=10,
                 ) as cd:
                     t = cd.add_task(f"Cooldown {seconds}s", total=seconds)
                     for _ in range(seconds):
@@ -3531,6 +3543,9 @@ def run_post_mode(args):
             TextColumn("{task.completed}/{task.total}"),
             TimeElapsedColumn(),
             console=console,
+            force_terminal=True,
+            markup=False,
+            refresh_per_second=10,
         ) as progress:
             task_id = progress.add_task("Posting", total=len(pending))
 
