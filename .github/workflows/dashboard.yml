@@ -1,0 +1,132 @@
+name: DamaDam Dashboard
+
+"on":
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode (--mode)"
+        type: choice
+        required: true
+        default: msg
+        options:
+          - msg
+          - post
+          - inbox
+          - populate
+          - logs
+          - setup
+      max_profiles:
+        description: "--max-profiles (empty = unlimited / all)"
+        type: string
+        required: false
+        default: ""
+      dry_run:
+        description: "--dry-run (no posting/sending + no sheet writes)"
+        type: boolean
+        required: true
+        default: false
+      populate_img_links:
+        description: "--populate-img-links (only used for post/populate flows)"
+        type: boolean
+        required: true
+        default: false
+      populate_limit:
+        description: "--populate-limit (only for populate mode; empty = default)"
+        type: string
+        required: false
+        default: ""
+      populate_write:
+        description: "--populate-write (only for populate mode)"
+        type: boolean
+        required: true
+        default: false
+      headless:
+        description: "DD_HEADLESS env (headless chrome)"
+        type: boolean
+        required: true
+        default: true
+      debug:
+        description: "DD_DEBUG env (more logs)"
+        type: boolean
+        required: true
+        default: false
+
+concurrency:
+  group: damadam-dashboard
+  cancel-in-progress: true
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Setup Chrome
+        uses: browser-actions/setup-chrome@v1
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write Google credentials
+        env:
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+        run: |
+          python - <<'PY'
+          import os
+          data = os.getenv('GOOGLE_CREDENTIALS_JSON', '')
+          if not data:
+              raise SystemExit('Missing secret GOOGLE_CREDENTIALS_JSON')
+          with open('credentials.json', 'w', encoding='utf-8') as f:
+              f.write(data)
+          PY
+
+      - name: Run Bot
+        env:
+          DD_LOGIN_EMAIL: ${{ secrets.DD_LOGIN_EMAIL }}
+          DD_LOGIN_PASS:  ${{ secrets.DD_LOGIN_PASS }}
+          DD_SHEET_ID:    ${{ secrets.DD_SHEET_ID }}
+          DD_HEADLESS:    "${{ inputs.headless && '1' || '0' }}"
+          DD_DEBUG:       "${{ inputs.debug && '1' || '0' }}"
+        run: |
+          set -euo pipefail
+
+          ARGS=("--mode" "${{ inputs.mode }}" "--no-menu")
+
+          if [ -n "${{ inputs.max_profiles }}" ]; then
+            ARGS+=("--max-profiles" "${{ inputs.max_profiles }}")
+          fi
+
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            ARGS+=("--dry-run")
+          fi
+
+          if [ "${{ inputs.populate_img_links }}" = "true" ]; then
+            ARGS+=("--populate-img-links")
+          fi
+
+          if [ -n "${{ inputs.populate_limit }}" ]; then
+            ARGS+=("--populate-limit" "${{ inputs.populate_limit }}")
+          fi
+
+          if [ "${{ inputs.populate_write }}" = "true" ]; then
+            ARGS+=("--populate-write")
+          fi
+
+          echo "Running: python main.py ${ARGS[*]}"
+          python main.py "${ARGS[@]}"
+
+      - name: Upload Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: damadam-dashboard-logs-${{ github.run_number }}
+          path: logs/*.log
