@@ -27,6 +27,12 @@ Notes:
 
 ## Installation
 
+### Requirements
+
+- **Python**: 3.11+ recommended
+- **Google Chrome** installed (for Selenium)
+- **ChromeDriver** (Windows local runs only if you want to pin a driver). If you don't provide a working ChromeDriver path, Selenium will try to manage it automatically.
+
 ### 1. Install Dependencies
 
 ```bash
@@ -72,6 +78,9 @@ CREDENTIALS_FILE=credentials.json
 # Browser
 CHROMEDRIVER_PATH=chromedriver.exe
 
+# Optional: run Chrome headless (recommended for CI)
+DD_HEADLESS=1
+
 # Bot Settings
 DD_DEBUG=0
 DD_MAX_PROFILES=0
@@ -80,75 +89,6 @@ DD_AUTO_PUSH=0
 
 # Optional: Auto-populate IMG_LINK in PostQueue from POST_LINK
 DD_POPULATE_IMG_LINKS=0
-```
-
-## Google Sheets Structure
-
-### Sheet 1: MsgList (Message Targets)
-
-Example rows:
-
-```text
-MODE | NAME | NICK/URL | CITY | POSTS | FOLLOWERS | MESSAGE | STATUS | NOTES | RESULT URL
-nick | John | john123  | Karachi | 50 | 100 | Hello {{name}}! | pending | | 
-url  | Sara | https://damadam.pk/comments/text/12345 |  |  |  | Hi there! | pending | |
-```
-
-**Columns:**
-
-- **MODE**: `nick` or `url`
-- **NAME**: Display name
-- **NICK/URL**: Nickname (nick mode) or direct post URL (url mode)
-- **CITY/POSTS/FOLLOWERS**: Auto-filled from profile
-- **MESSAGE**: Template message (supports: {{name}}, {{city}}, {{posts}}, {{followers}})
-- **STATUS**: `pending` → `Done/Failed/Skipped`
-- **NOTES**: Error details
-- **RESULT URL**: Final post URL
-
-### Sheet 2: PostQueue (Create Posts)
-
-Example (current layout):
-
-```text
-TITLE_EN | TITLE_UR | IMG_LINK | POST_LINK | RELATED | TYPE | STATUS | POST_URL | TIMESTAMP | NOTES | BY | POST_LINK | PREVIEW
-```
-
-**Key columns used by the bot:**
-
-- **TYPE**: `text` or `image`
-- **STATUS**: `pending` → `Done/Failed`
-- **IMG_LINK**:
-  - For image posts: direct image URL (or local path)
-  - Can be auto-filled by the bot from **POST_LINK**
-- **POST_LINK**: source page URL (used only for auto-filling IMG_LINK)
-- **TITLE_EN**:
-  - If TYPE=`text`: used as the post content
-  - If TYPE=`image`: used as the post title (if supported by DamaDam form)
-- **TITLE_UR**: if TYPE=`image`, used as image caption
-- **POST_URL / TIMESTAMP / NOTES**: output columns written by the bot after posting
-
-### Sheet 3: InboxQueue (Inbox Replies)
-
-Example rows:
-
-```text
-NICK | NAME | LAST_MSG | MY_REPLY | STATUS | TIMESTAMP | NOTES | CONVERSATION_LOG
-user123 | User | Hi there! | Hello! How are you? | pending | 2025-01-16 10:30:00 | |
-```
-
-**Workflow:**
-
-1. Bot fetches inbox → adds new conversations with STATUS=`pending`
-2. You manually fill **MY_REPLY** column
-3. Run bot again → it sends replies
-4. STATUS changes to `sent`, full conversation saved in CONVERSATION_LOG
-
-### Sheet 4: MsgHistory (Auto-created)
-
-Records all sent messages by nickname for tracking.
-
-```text
-TIMESTAMP | NICK | NAME | MESSAGE | POST_URL | STATUS | RESULT_URL
 ```
 
 ## Usage
@@ -170,83 +110,28 @@ You can choose:
 
 Then enter `0` to process all rows, or a number to limit.
 
-### MSG Mode (Send Personal Messages)
+### CLI (non-interactive)
+
+If you are running via GitHub Actions / automation, always use `--no-menu`.
+
+You can choose:
+
+- **1** Message Mode
+- **2** Post Mode
+- **3** Inbox Mode
+- **4** Populate IMG_LINK (PostQueue)
+
+Then enter `0` to process all rows, or a number to limit.
+
+### POPULATE Mode (Rekhta populate / queue helpers)
 
 ```bash
-# Send messages to all pending targets
-python main.py --mode msg
+# Preview populate (no write)
+python main.py --mode populate --no-menu --populate-limit 10
 
-# Limit to 10 targets
-python main.py --mode msg --max-profiles 10
-
-# Debug mode
-DD_DEBUG=1 python main.py --mode msg --max-profiles 1
+# Write results to PostQueue
+python main.py --mode populate --no-menu --populate-limit 10 --populate-write
 ```
-
-**How it works:**
-
-1. Reads pending targets from `MsgList` sheet
-2. For **nick mode**: Scrapes profile → finds open post → sends message
-3. For **url mode**: Uses direct URL → sends message
-4. Processes template placeholders ({{name}}, {{city}}, etc.)
-5. Verifies message posted
-6. Updates sheet with result
-7. Records to `MsgHistory`
-
-### POST Mode (Create Posts)
-
-```bash
-# Create all pending posts
-python main.py --mode post
-
-# Limit to 5 posts
-python main.py --mode post --max-profiles 5
-
-# Populate IMG_LINK from POST_LINK first (when IMG_LINK is empty)
-python main.py --mode post --populate-img-links
-```
-
-**How it works:**
-
-1. Reads pending posts from `PostQueue`
-2. For **text posts**: Opens text creation form → fills → submits
-3. For **image posts**: Opens upload form → uploads local file → submits
-4. Updates sheet with post URL and status
-
-### INBOX Mode (Monitor & Reply)
-
-```bash
-# Check inbox and send replies
-python main.py --mode inbox
-```
-
-**How it works:**
-
-1. Fetches all inbox conversations
-2. Adds new conversations to `InboxQueue` with STATUS=`pending`
-3. Finds rows where MY_REPLY is filled and STATUS=`pending`
-4. Sends those replies
-5. Updates STATUS to `sent`
-6. Records full conversation log
-
-## Logs
-
-All logs saved to `logs/` folder:
-
-```text
-logs/
-├── msg_20250116_143022.log      # Message mode logs
-├── post_20250116_143523.log     # Post mode logs
-└── inbox_20250116_144012.log    # Inbox mode logs
-```
-
-Each log contains:
-
-- Timestamps in Pakistan time
-- Operation details
-- Success/failure status
-- Error messages
-- API call counts
 
 ## Configuration Options
 
@@ -254,65 +139,65 @@ Each log contains:
 
 - `DD_LOGIN_EMAIL`: DamaDam username (required)
 - `DD_LOGIN_PASS`: DamaDam password (required)
+- `DD_LOGIN_EMAIL2`: Secondary username (optional)
+- `DD_LOGIN_PASS2`: Secondary password (optional)
 - `DD_SHEET_ID`: Main Google Sheet ID (required)
 - `DD_PROFILES_SHEET_ID`: Profiles sheet ID (optional)
-- `CREDENTIALS_FILE`: Google credentials file (default: `credentials.json`)
-- `CHROMEDRIVER_PATH`: ChromeDriver path (default: `chromedriver.exe`)
-- `DD_DEBUG`: Enable debug logging (default: `0`)
-- `DD_MAX_PROFILES`: Max targets to process (default: `0` = unlimited)
+- `CREDENTIALS_FILE`: Google credentials file path (default: `credentials.json`)
+- `CHROMEDRIVER_PATH`: ChromeDriver path (default: `chromedriver.exe`, or use `auto`)
+- `DD_HEADLESS`: Run Chrome headless (`1`/`0`, default `1`)
+- `DD_DEBUG`: Enable debug logging (`1`/`0`, default `0`)
+- `DD_DRY_RUN`: Global dry-run (`1`/`0`, default `0`)
+- `DD_MAX_PROFILES`: Max targets to process (`0` = unlimited)
 - `DD_MAX_POST_PAGES`: Max pages to search for open posts (default: `4`)
-- `DD_AUTO_PUSH`: Auto git push after run (default: `0`)
+- `DD_POST_COOLDOWN_SECONDS`: Delay between posts (default: `120`)
+- `DD_POST_RETRY_FAILED`: Retry rows with `STATUS=Failed` (`1`/`0`)
+- `DD_POST_MAX_ATTEMPTS`: Max attempts per row when retry enabled
+- `DD_POST_DENIED_RETRIES`: Backoff retries for denied redirects
+- `DD_POST_DENIED_BACKOFF_SECONDS`: Backoff seconds for denied redirects
+- `DD_POST_MAX_REPEAT_CHARS`: Repeated char clamp (default: `6`)
+- `DD_POST_CAPTION_MAX_LEN`: Caption max length (default: `300`)
+- `DD_POST_TAGS_MAX_LEN`: Tags max length (default: `120`)
+- `DD_IMAGE_DOWNLOAD_TIMEOUT_SECONDS`: Image download timeout (default: `90`)
+- `DD_IMAGE_DOWNLOAD_RETRIES`: Image download retries (default: `3`)
+- `DD_IMAGE_DOWNLOAD_RETRY_DELAY_SECONDS`: Retry delay seconds (default: `5`)
+- `DD_AUTO_PUSH`: Auto push after run (default: `0`)
 
-## Message Templates
+For a full template, see `.env.sample`.
 
-Use these placeholders in your messages:
+**CLI Flags:**
 
-```text
-Hello {{name}}!
+- `--mode {msg,populate,post,inbox,logs,setup}`
+- `--max-profiles N`
+- `--dry-run`
+- `--no-menu`
+- `--populate-img-links`
+- `--populate-limit N`
+- `--populate-write`
 
-I see you're from {{city}} and have {{posts}} posts!
-You have {{followers}} followers - impressive!
+## GitHub Actions (Manual Dashboard)
 
-Best regards!
-```
+This repo includes a single workflow:
 
-**Available Placeholders:**
+- `.github/workflows/dashboard.yml` (Run workflow button)
 
-- `{{name}}` - User's display name
-- `{{nick}}` - User's nickname
-- `{{city}}` - User's city
-- `{{posts}}` - Number of posts
-- `{{followers}}` - Number of followers
+**Required GitHub Secrets:**
 
-## Troubleshooting
+- `DD_LOGIN_EMAIL`
+- `DD_LOGIN_PASS`
+- `DD_SHEET_ID`
+- `GOOGLE_CREDENTIALS_JSON` (paste your `credentials.json` content)
 
-### Login Fails
+**How to run:**
 
-```bash
-# Delete old cookies and try again
-rm damadam_cookies.pkl
-python main.py --mode msg --max-profiles 1
-```
+1. Go to **Actions** tab
+2. Open **DamaDam Dashboard**
+3. Click **Run workflow**
+4. Select `mode` and options like `max_profiles`, `dry_run`, etc.
 
-### No Open Posts Found
+Logs are uploaded automatically as an artifact (`logs/*.log`).
 
-- User's posts might have comments disabled
-- Increase search depth: `DD_MAX_POST_PAGES=10`
-- Try direct URL mode instead
-
-### Form Not Found
-
-- Enable debug mode: `DD_DEBUG=1`
-- Check logs for detailed error
-- Page structure might have changed
-
-### Sheets Connection Failed
-
-- Verify `credentials.json` is correct
-- Check if sheet is shared with service account
-- Verify sheet ID in `.env`
-
-## Example Workflows
+## Example Usage Workflows
 
 ### Workflow 1: Mass Personal Messaging
 
