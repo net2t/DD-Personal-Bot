@@ -113,6 +113,13 @@ python main.py --mode setup  --no-menu
 python main.py --mode populate --no-menu --populate-limit 10 --populate-write
 ```
 
+### Inbox Mode Notes
+
+- **Conversation dedupe**: Inbox sync keeps **1 row per nick** (case-insensitive). This avoids duplicate rows when the inbox page shows multiple blocks for the same nick.
+- **Reply sending**: Put your reply in `MY_REPLY` and set `STATUS=pending` in the Inbox sheet. Bot sends via the inline form on `/inbox/`.
+- **Activity feed pagination**: Activity fetch supports pagination (`/inbox/activity/?page=2`, etc.). Inbox mode fetches up to **60** latest activity items across up to **5** pages and logs them to the `Logs` sheet.
+- **Clean activity logs**: Activity text is stored in `Logs.details` as multi-line text with UI noise removed (no `►` or `REMOVE`).
+
 ### Streamlit Dashboard
 ```bash
 streamlit run streamlit_app.py

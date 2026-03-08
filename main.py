@@ -1539,6 +1539,26 @@ class PostCreator:
             return self._parse_rate_limit_seconds(low)
         return 0
 
+    def _detect_repeating_image(self) -> bool:
+        try:
+            src = (self.driver.page_source or "")
+        except Exception:
+            src = ""
+        low = src.lower()
+        if "<title>duplicate image | damadam</title>" in low:
+            return True
+        if "duplicate image!" in low:
+            return True
+        if "is jesa image pehle upload ho chuka hai" in low:
+            return True
+        if "repeat" in low or "repeating" in low or "already" in low:
+            return True
+        if "same image" in low or "duplicate" in low or "pehle" in low:
+            return True
+        if "tasveer" in low and ("dobara" in low or "bar bar" in low or "phir" in low):
+            return True
+        return False
+
     def _find_share_form(self, require_file: bool) -> Optional[object]:
         forms = self.driver.find_elements(By.CSS_SELECTOR, "form")
         for f in forms:
@@ -1675,6 +1695,23 @@ class PostCreator:
                     tags_input.send_keys(tags)
                 except Exception:
                     pass
+
+            self._select_radio_option(form=form, name="exp", value="i", label_text="Never expire post")
+            self._select_radio_option(form=form, name="com", value="0", label_text="Yes")
+
+            try:
+                exp_first = form.find_elements(By.CSS_SELECTOR, "#exp-first")
+                if exp_first and not exp_first[0].is_selected():
+                    self.driver.execute_script("arguments[0].click();", exp_first[0])
+            except Exception:
+                pass
+
+            try:
+                com_off = form.find_elements(By.CSS_SELECTOR, "#com-off")
+                if com_off and not com_off[0].is_selected():
+                    self.driver.execute_script("arguments[0].click();", com_off[0])
+            except Exception:
+                pass
 
             self.logger.info("Submitting text post...")
             self.driver.execute_script("arguments[0].click();", submit_btn)
@@ -2840,54 +2877,57 @@ class InboxMonitor:
             self.driver.get(f"{Config.BASE_URL}/inbox/")
             time.sleep(3)
 
-            messages = []
+            messages: List[Dict] = []
 
-            # Find conversation items
-            conversations = self.driver.find_elements(
-                By.CSS_SELECTOR,
-                "article, .conversation-item, div[class*='inbox'], li"
-            )
+            seen_nicks: set = set()
 
-            if not conversations:
+            blocks = self.driver.find_elements(By.CSS_SELECTOR, "div.mbl.mtl")
+            if not blocks:
                 self.logger.warning("No inbox items found (check page structure)")
                 return []
 
-            self.logger.debug(f"Found {len(conversations)} potential inbox items")
-
-            for conv in conversations:
+            for b in blocks[:20]:
                 try:
-                    # Extract nickname
-                    nick_elem = conv.find_element(
-                        By.CSS_SELECTOR,
-                        "a[href*='/users/'], b, strong"
-                    )
-                    nick = nick_elem.text.strip()
+                    nick = ""
+                    try:
+                        nick_el = b.find_elements(By.CSS_SELECTOR, "div.cl bdi")
+                        if nick_el:
+                            nick = (nick_el[0].text or "").strip()
+                    except Exception:
+                        nick = ""
+
                     if not nick:
                         continue
 
-                    # Extract last message preview
-                    msg_elem = conv.find_element(
-                        By.CSS_SELECTOR,
-                        "span, .message-preview, bdi, p"
-                    )
-                    last_msg = msg_elem.text.strip()
+                    nk = nick.strip().lower()
+                    if nk in seen_nicks:
+                        continue
+                    seen_nicks.add(nk)
 
-                    # Extract timestamp
+                    last_msg = ""
+                    timestamp = ""
                     try:
-                        time_elem = conv.find_element(
-                            By.CSS_SELECTOR,
-                            "time, span.time, .timestamp, small"
-                        )
-                        timestamp = time_elem.text.strip()
+                        line = b.find_elements(By.CSS_SELECTOR, "div.cl.lsp.nos")
+                        if line:
+                            last_msg = (line[0].text or "").strip()
+                            ts_el = line[0].find_elements(By.CSS_SELECTOR, "span[style*='color:#999'], span.cxs")
+                            if ts_el:
+                                timestamp = (ts_el[-1].text or "").strip()
                     except Exception:
+                        pass
+
+                    if not timestamp:
                         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-                    # Get conversation URL
-                    link_elem = conv.find_element(
-                        By.CSS_SELECTOR,
-                        "a[href*='/inbox/'], a[href*='/users/']"
-                    )
-                    conv_url = link_elem.get_attribute("href")
+                    conv_url = f"{Config.BASE_URL}/inbox/"
+                    try:
+                        a = b.find_elements(By.CSS_SELECTOR, "a[href*='/comments/'], a[href*='/content/']")
+                        if a:
+                            href = (a[0].get_attribute("href") or "").strip()
+                            if href:
+                                conv_url = href if href.startswith("http") else f"{Config.BASE_URL}{href}"
+                    except Exception:
+                        pass
 
                     messages.append({
                         "nick": nick,
@@ -2895,9 +2935,6 @@ class InboxMonitor:
                         "timestamp": timestamp,
                         "conv_url": conv_url
                     })
-
-                    self.logger.debug(f"Inbox: {nick} - {last_msg[:30]}...")
-
                 except Exception as e:
                     self.logger.debug(f"Skipped inbox item: {e}")
                     continue
@@ -2919,40 +2956,142 @@ class InboxMonitor:
             self.driver.get(conv_url)
             time.sleep(3)
 
-            # Find reply form
-            textarea = self.driver.find_element(
-                By.CSS_SELECTOR,
-                "textarea[name='message'], textarea"
-            )
-            send_btn = self.driver.find_element(
-                By.CSS_SELECTOR,
-                "button[type='submit']"
-            )
+            form = None
+            forms = self.driver.find_elements(By.CSS_SELECTOR, "form[action*='/direct-response/send']")
+            for f in forms:
+                try:
+                    if f.find_elements(By.CSS_SELECTOR, "textarea[name='direct_response']"):
+                        form = f
+                        break
+                except Exception:
+                    continue
 
-            # Type and send
-            textarea.clear()
+            if not form:
+                self.driver.get(f"{Config.BASE_URL}/inbox/")
+                time.sleep(3)
+                forms = self.driver.find_elements(By.CSS_SELECTOR, "form[action*='/direct-response/send']")
+                for f in forms:
+                    try:
+                        if f.find_elements(By.CSS_SELECTOR, "textarea[name='direct_response']"):
+                            form = f
+                            break
+                    except Exception:
+                        continue
+
+            if not form:
+                self.logger.error("Reply form not found")
+                return False
+
+            textarea = form.find_element(By.CSS_SELECTOR, "textarea[name='direct_response']")
+            send_btn = None
+            try:
+                btns = form.find_elements(By.CSS_SELECTOR, "button[type='submit'][name='dec'][value='1']")
+                if btns:
+                    send_btn = btns[0]
+            except Exception:
+                send_btn = None
+            if not send_btn:
+                send_btn = form.find_element(By.CSS_SELECTOR, "button[type='submit']")
+
+            try:
+                textarea.clear()
+            except Exception:
+                pass
             textarea.send_keys(reply_text)
             self.logger.debug(f"Typed reply: {len(reply_text)} chars")
             time.sleep(0.5)
 
-            send_btn.click()
+            self.driver.execute_script("arguments[0].click();", send_btn)
             self.logger.info("Reply sent")
             time.sleep(3)
 
-            # Verify
-            self.driver.refresh()
-            time.sleep(2)
-
-            if reply_text in self.driver.page_source:
-                self.logger.success("Reply verified")
-                return True
-            else:
-                self.logger.warning("Reply sent but not verified")
-                return True  # Assume success
+            try:
+                if reply_text in (self.driver.page_source or ""):
+                    self.logger.success("Reply verified")
+                    return True
+            except Exception:
+                pass
+            self.logger.warning("Reply sent but not verified")
+            return True
 
         except Exception as e:
             self.logger.error(f"Reply error: {e}")
             return False
+
+    def fetch_activity(self, max_items: int = 20, max_pages: int = 3) -> List[Dict]:
+        try:
+            items: List[Dict] = []
+            seen: set = set()
+
+            for page in range(1, max_pages + 1):
+                if len(items) >= max_items:
+                    break
+
+                url = f"{Config.BASE_URL}/inbox/activity/" if page == 1 else f"{Config.BASE_URL}/inbox/activity/?page={page}"
+                self.driver.get(url)
+                time.sleep(3)
+
+                blocks = self.driver.find_elements(By.CSS_SELECTOR, "div.mbl.mtl")
+                if not blocks:
+                    break
+
+                for b in blocks:
+                    if len(items) >= max_items:
+                        break
+                    try:
+                        raw = (b.text or "").strip()
+                        if not raw:
+                            continue
+
+                        lines = []
+                        for ln in raw.splitlines():
+                            s = (ln or "").strip()
+                            if not s:
+                                continue
+                            if s in {"►", "REMOVE"}:
+                                continue
+                            lines.append(s)
+
+                        t = "\n".join(lines).strip()
+                        if not t:
+                            continue
+
+                        item_url = ""
+                        try:
+                            a = b.find_elements(By.CSS_SELECTOR, "a[href*='/comments/'], a[href*='/content/']")
+                            if a:
+                                href = (a[0].get_attribute("href") or "").strip()
+                                if href:
+                                    item_url = href if href.startswith("http") else f"{Config.BASE_URL}{href}"
+                        except Exception:
+                            pass
+
+                        key = (t[:200], item_url)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        items.append({"text": t[:500], "url": item_url})
+                    except Exception:
+                        continue
+
+                try:
+                    next_btn = self.driver.find_elements(By.CSS_SELECTOR, "a[href*='?page='] button")
+                    has_next = False
+                    for btn in next_btn:
+                        try:
+                            if "NEXT" in ((btn.text or "").upper()):
+                                has_next = True
+                                break
+                        except Exception:
+                            continue
+                    if not has_next:
+                        break
+                except Exception:
+                    break
+
+            return items
+        except Exception:
+            return []
 
     def get_conversation_log(self, conv_url: str) -> str:
         """Get full conversation history as text"""
@@ -4224,6 +4363,29 @@ def run_inbox_mode(args):
         inbox_messages = monitor.fetch_inbox()
         logger.success(f"Found {len(inbox_messages)} conversations\n")
 
+        try:
+            activity_items = monitor.fetch_activity(max_items=60, max_pages=5)
+        except Exception:
+            activity_items = []
+
+        if activity_items:
+            try:
+                logger.info(f"🧾 Activity items: {len(activity_items)} (latest)")
+            except Exception:
+                pass
+            for it in activity_items[:20]:
+                try:
+                    activity.log(
+                        mode="inbox",
+                        action="activity",
+                        nick="",
+                        url=(it.get("url", "") or ""),
+                        status="info",
+                        details=(it.get("text", "") or "")[:500]
+                    )
+                except Exception:
+                    pass
+
         sheets_mgr.api_calls += 1
         existing_rows = inbox_queue.get_all_values()
         existing_nicks = {row[0].strip().lower() for row in existing_rows[1:] if row}
@@ -4234,8 +4396,14 @@ def run_inbox_mode(args):
         }
 
         new_count = 0
+        appended_this_run: set = set()
         for msg in inbox_messages:
-            if msg["nick"].lower() not in existing_nicks:
+            nick_key = (msg.get("nick") or "").strip().lower()
+            if not nick_key:
+                continue
+            if nick_key in appended_this_run:
+                continue
+            if nick_key not in existing_nicks:
                 values = [
                     msg["nick"], msg["nick"], msg["last_msg"], "",
                     "pending", msg["timestamp"], "", ""
@@ -4243,6 +4411,8 @@ def run_inbox_mode(args):
                 sheets_mgr.append_row(inbox_queue, values)
                 logger.info(f"➕ New: {msg['nick']}")
                 new_count += 1
+                appended_this_run.add(nick_key)
+                existing_nicks.add(nick_key)
 
                 try:
                     activity.log(
