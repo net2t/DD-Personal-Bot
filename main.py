@@ -4976,20 +4976,22 @@ def main():
         Config.REKHTA_POPULATE_LIMIT = 0 if pl <= 0 else pl
 
     try:
+        # Lazily import modes to avoid circular imports at module load time.
+        import modes
         if args.mode == "msg":
-            run_message_mode(args)
+            modes.run_message_mode(args)
         elif args.mode == "populate":
-            run_populate_mode(args)
+            modes.run_populate_mode(args)
         elif args.mode == "post":
-            run_post_mode(args)
+            modes.run_post_mode(args)
         elif args.mode == "inbox":
-            run_inbox_mode(args)
+            modes.run_inbox_mode(args)
         elif args.mode == "activity":
-            run_activity_mode(args)
+            modes.run_activity_mode(args)
         elif args.mode == "logs":
-            run_logs_mode()
+            modes.run_logs_mode()
         elif args.mode == "setup":
-            run_setup_mode()
+            modes.run_setup_mode()
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted[/yellow]")
     except Exception as e:
