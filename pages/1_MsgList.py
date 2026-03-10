@@ -12,6 +12,12 @@ from dotenv import load_dotenv
 load_dotenv(override=False)
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from main import Config, SheetsManager, Logger
+from utils.ui_helpers import (
+    load_custom_css, create_metric_card, create_glowing_container,
+    create_status_badge, create_dashboard_header, create_filter_controls,
+    apply_filters, create_glowing_button, create_data_table_with_style,
+    create_info_card, create_stats_grid
+)
 
 # ── helpers ────────────────────────────────────────────────────────────────
 
@@ -50,7 +56,15 @@ def _save_row(sheets_mgr, ws, df_row, original_df):
 # ── UI ─────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="MsgList", page_icon="💬", layout="wide")
-st.title("💬 MsgList — Target Messages")
+
+# Load custom CSS for professional styling
+load_custom_css()
+
+# Create dashboard header
+create_dashboard_header(
+    "💬 Message List Dashboard",
+    "Manage and track your messaging campaigns"
+)
 
 sm, log = _sheets()
 if sm is None:
@@ -70,49 +84,77 @@ if df is None:
     st.stop()
 
 if df.empty:
-    st.info("MsgList is empty. Add rows below.")
+    create_info_card(
+        "No Messages Found",
+        "Your message list is empty. Add new targets below to get started with your messaging campaign.",
+        icon="📭",
+        color="#ffa726"
+    )
 else:
-    # ── Filter bar ─────────────────────────────────────────────────────────
-    status_col = "STATUS" if "STATUS" in df.columns else None
-    filter_val = "All"
+    # ── Summary Stats ─────────────────────────────────────────────────────
+    stats = {
+        "Total Targets": len(df),
+        "Pending": len(df[df[status_col].str.lower().str.startswith("pending")] if status_col else []),
+        "Completed": len(df[df[status_col].str.lower().isin(["done", "sent"])]) if status_col else 0
+    }
+    create_stats_grid(stats, columns=3)
+    
+    # ── Filter Controls ─────────────────────────────────────────────────────
     if status_col:
-        options = ["All"] + sorted(df[status_col].dropna().unique().tolist())
-        filter_val = st.selectbox("Filter by STATUS", options)
-        view = df if filter_val == "All" else df[df[status_col] == filter_val]
+        filters = create_filter_controls(df, ["STATUS"])
+        view = apply_filters(df, filters)
     else:
         view = df
 
-    st.caption(f"Showing {len(view)} rows")
+    st.caption(f"Showing {len(view)} targets")
 
-    # ── Editable table ─────────────────────────────────────────────────────
+    # ── Editable Table ─────────────────────────────────────────────────────
     display_cols = [c for c in view.columns if c != "_row"]
+    
+    create_glowing_container(
+        f"📝 **Edit Targets** - Modify message details and status",
+        glow_color="#667eea"
+    )
+    
     edited = st.data_editor(
         view[display_cols],
         use_container_width=True,
         num_rows="dynamic",
         key="msglist_editor",
+        column_config={
+            "STATUS": st.column_config.SelectboxColumn(
+                "STATUS",
+                options=["pending", "Done", "Failed", "Skipped"],
+                default="pending"
+            )
+        } if "STATUS" in view.columns else None
     )
 
     col1, col2 = st.columns([1, 5])
     with col1:
-        if st.button("💾 Save Changes", type="primary"):
+        if create_glowing_button("Save Changes", "save_msg", "💾", primary=True):
             with st.spinner("Saving…"):
                 # Rebuild with _row column
                 edited_with_row = edited.copy()
                 edited_with_row.insert(0, "_row", view["_row"].values[:len(edited)])
                 for _, row in edited_with_row.iterrows():
                     _save_row(sm, ws, row, df)
-            st.success("✅ Saved to Google Sheets!")
+            create_success_animation("Changes saved successfully!")
             st.cache_resource.clear()
             st.rerun()
     with col2:
-        if st.button("🔄 Refresh"):
+        if create_glowing_button("Refresh", "refresh_msg", "🔄"):
             st.cache_resource.clear()
             st.rerun()
 
-st.divider()
-st.subheader("➕ Add New Target")
+create_gradient_header("➕ Add New Target", "1.5rem")
+
 with st.form("add_msg"):
+    create_glowing_container(
+        "📝 **Target Information** - Fill in the details below",
+        glow_color="#764ba2"
+    )
+    
     cols = st.columns(3)
     mode = cols[0].selectbox("MODE", ["nick", "url"])
     name = cols[1].text_input("NAME")
@@ -121,7 +163,7 @@ with st.form("add_msg"):
     city = cols2[0].text_input("CITY")
     message = cols2[1].text_area("MESSAGE", height=80)
     status = cols2[2].selectbox("STATUS", ["pending", "Done", "Failed", "Skipped"])
-    submitted = st.form_submit_button("Add Row")
+    submitted = st.form_submit_button("Add Target", type="primary")
     if submitted:
         if not nick:
             st.warning("NICK/URL is required.")
@@ -133,8 +175,8 @@ with st.form("add_msg"):
             row_vals = {h: "" for h in headers}
             row_vals.update({"MODE": mode, "NAME": name, "NICK/URL": nick,
                              "CITY": city, "MESSAGE": message, "STATUS": status})
-            with st.spinner("Adding row…"):
+            with st.spinner("Adding target…"):
                 sm.append_row(ws, [row_vals.get(h, "") for h in headers])
-            st.success("✅ Row added!")
+            create_success_animation("Target added successfully!")
             st.cache_resource.clear()
             st.rerun()

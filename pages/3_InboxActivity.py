@@ -12,6 +12,12 @@ from dotenv import load_dotenv
 load_dotenv(override=False)
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from main import Config, SheetsManager, Logger
+from utils.ui_helpers import (
+    load_custom_css, create_metric_card, create_glowing_container,
+    create_status_badge, create_dashboard_header, create_filter_controls,
+    apply_filters, create_glowing_button, create_data_table_with_style,
+    create_info_card, create_stats_grid, create_activity_chart
+)
 
 
 @st.cache_resource(show_spinner=False)
@@ -45,7 +51,15 @@ def _save_row(sm, ws, df_row, original_df):
 # ── UI ─────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Inbox & Activity", page_icon="📥", layout="wide")
-st.title("📥 Inbox & Activity")
+
+# Load custom CSS for professional styling
+load_custom_css()
+
+# Create dashboard header
+create_dashboard_header(
+    "📥 Inbox & Activity Dashboard",
+    "Monitor conversations and track system activity"
+)
 
 sm, log = _sheets()
 if sm is None:
@@ -73,25 +87,41 @@ with tab_inbox:
     if inbox_df is None:
         st.error("Could not load Inbox sheet.")
     elif inbox_df.empty:
-        st.info("Inbox is empty. Run `python main.py --mode inbox` to fetch messages.")
+        create_info_card(
+            "No Inbox Messages",
+            "Your inbox is empty. Run `python main.py --mode inbox` to fetch messages from your account.",
+            icon="📭",
+            color="#ffa726"
+        )
     else:
         # Summary metrics
         status_col = "STATUS" if "STATUS" in inbox_df.columns else None
-        m1, m2, m3 = st.columns(3)
-        m1.metric("Total Conversations", len(inbox_df))
-        if status_col:
-            m2.metric("Pending Replies", int((inbox_df[status_col].str.lower().str.startswith("pending")).sum()))
-            m3.metric("Sent", int((inbox_df[status_col].str.lower() == "sent").sum()))
+        
+        create_glowing_container(
+            "📊 **Inbox Overview** - Message statistics and status",
+            glow_color="#667eea"
+        )
+        
+        stats = {
+            "Total Conversations": len(inbox_df),
+            "Pending Replies": int((inbox_df[status_col].str.lower().str.startswith("pending")).sum()) if status_col else 0,
+            "Sent Replies": int((inbox_df[status_col].str.lower() == "sent").sum()) if status_col else 0
+        }
+        create_stats_grid(stats, columns=3)
 
         # Filter
         if status_col:
-            opts = ["All"] + sorted(inbox_df[status_col].dropna().unique().tolist())
-            f = st.selectbox("Filter STATUS", opts, key="inbox_filter")
-            view = inbox_df if f == "All" else inbox_df[inbox_df[status_col] == f]
+            filters = create_filter_controls(inbox_df, ["STATUS"])
+            view = apply_filters(inbox_df, filters)
         else:
             view = inbox_df
 
         st.caption(f"{len(view)} conversations")
+        
+        create_glowing_container(
+            "💬 **Message Management** - Review and reply to conversations",
+            glow_color="#764ba2"
+        )
         display_cols = [c for c in view.columns if c != "_row"]
         edited = st.data_editor(
             view[display_cols],
@@ -109,23 +139,28 @@ with tab_inbox:
 
         c1, c2 = st.columns([1, 5])
         with c1:
-            if st.button("💾 Save Replies", type="primary", key="save_inbox"):
+            if create_glowing_button("Save Replies", "save_inbox", "💾", primary=True):
                 with st.spinner("Saving…"):
                     ew = edited.copy()
                     ew.insert(0, "_row", view["_row"].values[:len(edited)])
                     for _, row in ew.iterrows():
                         _save_row(sm, inbox_ws, row, inbox_df)
-                st.success("✅ Replies saved! Run inbox mode to send them.")
+                create_success_animation("Replies saved successfully!")
                 st.cache_resource.clear()
                 st.rerun()
         with c2:
-            if st.button("🔄 Refresh", key="refresh_inbox"):
+            if create_glowing_button("Refresh", "refresh_inbox", "🔄"):
                 st.cache_resource.clear()
                 st.rerun()
 
-    st.divider()
-    st.subheader("➕ Add Inbox Entry Manually")
+    create_gradient_header("➕ Add Inbox Entry Manually", "1.2rem")
+    
     with st.form("add_inbox"):
+        create_glowing_container(
+            "📝 **Manual Entry** - Add conversation details manually",
+            glow_color="#f093fb"
+        )
+        
         cols = st.columns(3)
         nick = cols[0].text_input("NICK")
         name = cols[1].text_input("NAME")
@@ -134,14 +169,14 @@ with tab_inbox:
         reply = cols2[0].text_area("MY_REPLY", height=80)
         status = cols2[1].selectbox("STATUS", ["pending", "sent", "Done", "Skipped"])
         notes = cols2[2].text_input("NOTES")
-        sub = st.form_submit_button("Add")
+        sub = st.form_submit_button("Add Entry", type="primary")
         if sub and nick:
             from datetime import datetime
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             row_vals = [nick, name, last_msg, reply, status, ts, notes, ""]
-            with st.spinner("Adding…"):
+            with st.spinner("Adding entry…"):
                 sm.append_row(inbox_ws, row_vals)
-            st.success("✅ Entry added!")
+            create_success_animation("Entry added successfully!")
             st.cache_resource.clear()
             st.rerun()
 
@@ -153,9 +188,19 @@ with tab_activity:
     if logs_df is None:
         st.error("Could not load Logs sheet.")
     elif logs_df.empty:
-        st.info("No activity logged yet.")
+        create_info_card(
+            "No Activity Logged",
+            "No system activity has been recorded yet. The activity log will show bot operations and events.",
+            icon="📭",
+            color="#ffa726"
+        )
     else:
         # Filters
+        create_glowing_container(
+            "🔍 **Activity Filters** - Filter system logs by mode and status",
+            glow_color="#667eea"
+        )
+        
         c1, c2, c3 = st.columns(3)
         mode_opts = ["All"] + sorted(logs_df["MODE"].dropna().unique().tolist()) if "MODE" in logs_df.columns else ["All"]
         status_opts = ["All"] + sorted(logs_df["STATUS"].dropna().unique().tolist()) if "STATUS" in logs_df.columns else ["All"]
@@ -174,7 +219,7 @@ with tab_activity:
         display_cols = [c for c in view.columns if c != "_row"]
         st.dataframe(view[display_cols], use_container_width=True)
 
-        if st.button("🔄 Refresh Logs", key="refresh_logs"):
+        if create_glowing_button("Refresh Logs", "refresh_logs", "🔄"):
             st.cache_resource.clear()
             st.rerun()
 
@@ -186,11 +231,22 @@ with tab_conv:
     if conv_df is None:
         st.error("Could not load ConversationLog.")
     elif conv_df.empty:
-        st.info("No conversations logged yet.")
+        create_info_card(
+            "No Conversations Logged",
+            "No conversation history has been recorded yet. This log will track all message exchanges.",
+            icon="📭",
+            color="#ffa726"
+        )
     else:
         nick_opts = ["All"]
         if "NICK" in conv_df.columns:
             nick_opts += sorted(conv_df["NICK"].dropna().unique().tolist())
+        
+        create_glowing_container(
+            "💬 **Conversation Filters** - View chat history by user",
+            glow_color="#764ba2"
+        )
+        
         nick_f = st.selectbox("Filter by NICK", nick_opts, key="conv_nick")
         view = conv_df if nick_f == "All" else conv_df[conv_df["NICK"] == nick_f]
         view = view.tail(200)
@@ -199,6 +255,6 @@ with tab_conv:
         display_cols = [c for c in view.columns if c != "_row"]
         st.dataframe(view[display_cols], use_container_width=True)
 
-        if st.button("🔄 Refresh Conv", key="refresh_conv"):
+        if create_glowing_button("Refresh Conversations", "refresh_conv", "🔄"):
             st.cache_resource.clear()
             st.rerun()

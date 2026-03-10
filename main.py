@@ -504,8 +504,6 @@ class BrowserManager:
                 self.logger.debug("Browser closed")
             except Exception:
                 pass
-
-# ============================================================================
 # SHEETS MANAGER
 # ============================================================================
 
@@ -576,8 +574,8 @@ class SheetsManager:
                 "TIMESTAMP", "NICK", "NAME", "MESSAGE", "POST_URL", "STATUS", "NOTES", "RESULT_URL"
             ],
             "PostQueue": [
-                "STATUS", "TITLE", "TITLE_UR", "IMAGE_PATH", "TYPE",
-                "POST_URL", "TIMESTAMP", "NOTES", "SIGNATURE"
+                "STATUS", "TITLE", "URDU", "IMGLink", "TYPE",
+                "POSTL", "TIMESTAMP", "NOTES", "SIGNATURE"
             ],
             "PostQueueLog": [
                 "TIMESTAMP", "TYPE", "TITLE", "IMAGE_PATH", "POST_URL", "STATUS", "NOTES"
@@ -633,8 +631,8 @@ class SheetsManager:
     def ensure_postqueue_headers(self, sheet) -> bool:
         """Ensure PostQueue has required headers; append missing columns if needed."""
         required = [
-            "STATUS", "TITLE", "TITLE_UR", "IMAGE_PATH", "TYPE",
-            "POST_URL", "TIMESTAMP", "NOTES", "SIGNATURE"
+            "STATUS", "TITLE", "URDU", "IMGLink", "TYPE",
+            "POSTL", "TIMESTAMP", "NOTES", "SIGNATURE"
         ]
         try:
             headers = sheet.row_values(1)
@@ -655,8 +653,32 @@ class SheetsManager:
                 self.logger.error(f"Failed to insert PostQueue headers: {e}")
                 return False
 
+        # Rename legacy column headers in-place (preserve data; only changes row 1 labels).
+        rename_map = {
+            "TITLE_UR": "URDU",
+            "IMAGE_PATH": "IMGLink",
+            "POST_URL": "POSTL",
+        }
+        try:
+            new_headers = list(headers)
+            changed = False
+            for i, h in enumerate(headers):
+                key = (h or "").strip().upper()
+                if key in rename_map:
+                    new_headers[i] = rename_map[key]
+                    changed = True
+            if changed and not Config.DRY_RUN:
+                end_cell = rowcol_to_a1(1, len(new_headers) if new_headers else 1)
+                sheet.update(values=[new_headers], range_name=f"A1:{end_cell}")
+                headers = new_headers
+        except Exception as e:
+            self.logger.debug(f"PostQueue header rename skipped: {str(e)[:120]}")
+
         upper_headers = [(h or "").strip().upper() for h in headers]
-        missing = [h for h in required if h not in upper_headers]
+        required_upper = [(h or "").strip().upper() for h in required]
+        missing_upper = [h for h in required_upper if h not in upper_headers]
+        # Preserve original required casing when appending new columns
+        missing = [required[required_upper.index(h)] for h in missing_upper]
         if not missing:
             return True
 
@@ -2290,11 +2312,32 @@ class PostQueueLinkPopulator:
     def _extract_rekhta_image_payload(self) -> Dict[str, str]:
         """Extract minimal fields for PostQueue from a Rekhta shayari-image detail page.
 
-        Returns dict with keys: img_url, title, poet
+        Returns dict with keys: img_url, title, poet, urdu
         """
         img_url = ""
         title = ""
         poet = ""
+        urdu = ""
+
+        def _looks_translit(s: str) -> bool:
+            t = (s or "").strip()
+            if not t:
+                return False
+            if re.search(r"[A-Za-z]\\.[A-Za-z]", t):
+                return True
+            return False
+
+        def _first_nonempty_text(selectors: List[str]) -> str:
+            for sel in selectors:
+                try:
+                    els = self.driver.find_elements(By.CSS_SELECTOR, sel)
+                    if els:
+                        txt = self._clean_text(els[0].text)
+                        if txt:
+                            return txt
+                except Exception:
+                    continue
+            return ""
 
         # 1) Image URL: share widget has a direct PNG in data-mediasrc
         img_url = self._get_first_attr("div.shareSocial", "data-mediasrc")
@@ -2334,6 +2377,49 @@ class PostQueueLinkPopulator:
         except Exception:
             title = ""
 
+        # Prefer Urdu text if present (lang=ur or common urdu classes)
+        try:
+            # Common patterns on Rekhta: lang=ur, urdu class blocks
+            xp_candidates = [
+                "//*[@lang='ur']",
+                "//*[contains(@class,'urdu') or contains(@class,'Urdu') or contains(@class,'nasta') or contains(@class,'nastaliq')]",
+            ]
+            for xp in xp_candidates:
+                try:
+                    els = self.driver.find_elements(By.XPATH, xp)
+                    for el in els[:30]:
+                        txt = self._clean_text(el.text)
+                        if txt and len(txt) <= 140:
+                            urdu = txt
+                            break
+                    if urdu:
+                        break
+                except Exception:
+                    continue
+        except Exception:
+            urdu = ""
+
+        # If title looks like transliteration, try meta og:title/title tags
+        if title and _looks_translit(title):
+            try:
+                meta_title = self._get_first_attr("meta[property='og:title']", "content")
+                if not meta_title:
+                    meta_title = self._get_first_attr("meta[name='title']", "content")
+                if not meta_title:
+                    meta_title = self._get_first_attr("meta[name='twitter:title']", "content")
+                meta_title = self._clean_text(meta_title)
+                if meta_title:
+                    # Keep only the first segment to avoid site suffixes
+                    meta_title = meta_title.split("|")[0].strip()
+                    meta_title = meta_title.split("-")[0].strip() if " - " in meta_title else meta_title
+                    if meta_title and not _looks_translit(meta_title):
+                        title = meta_title
+            except Exception:
+                pass
+
+        if not title:
+            title = _first_nonempty_text(["h1", "h2", "div.shyriImgLine", "p.shyriImgLine"])
+
         # Poet
         try:
             p = ""
@@ -2344,7 +2430,7 @@ class PostQueueLinkPopulator:
         except Exception:
             poet = ""
 
-        return {"img_url": img_url, "title": title, "poet": poet}
+        return {"img_url": img_url, "title": title, "poet": poet, "urdu": urdu}
 
     def collect_rekhta_listing(
         self,
@@ -2601,15 +2687,15 @@ class PostQueueLinkPopulator:
 
         src_col_idx = None
         tgt_img_col_idx = None
-        tgt_title_ur_col_idx = None
+        tgt_urdu_col_idx = None
         tgt_title_en_col_idx = None
         for k, v in header_map.items():
             if k in {"POST_LINK", "SOURCE_URL", "SOURCE", "POST_LINK_", "POST LIN"}:
                 src_col_idx = v + 1
-            if k in {"IMG_LINK", "IMAGE_PATH", "IMAGE", "IMAGE_URL"}:
+            if k in {"IMGLINK", "IMG_LINK", "IMAGE_PATH", "IMAGE", "IMAGE_URL"}:
                 tgt_img_col_idx = v + 1
-            if k in {"TITLE_UR", "TITLE UR", "CAPTION"}:
-                tgt_title_ur_col_idx = v + 1
+            if k in {"URDU", "TITLE_UR", "TITLE UR", "CAPTION"}:
+                tgt_urdu_col_idx = v + 1
             if k in {"TITLE_EN", "TITLE EN", "TITLE_ENG", "TITLE", "TITLE_ENG"}:
                 tgt_title_en_col_idx = v + 1
 
@@ -2659,8 +2745,9 @@ class PostQueueLinkPopulator:
                 img_url = (payload.get("img_url") or "").strip()
                 title = (payload.get("title") or "").strip()
                 poet = (payload.get("poet") or "").strip()
+                urdu = (payload.get("urdu") or "").strip()
 
-                caption = title
+                caption = urdu or title
                 if poet:
                     caption = f"{caption} — by {poet}" if caption else f"by {poet}"
 
@@ -2688,8 +2775,8 @@ class PostQueueLinkPopulator:
                 if img_url:
                     pq_index.add(img_url)
 
-                if tgt_title_ur_col_idx and caption:
-                    sheet.update_cell(r_i, tgt_title_ur_col_idx, caption)
+                if tgt_urdu_col_idx and caption:
+                    sheet.update_cell(r_i, tgt_urdu_col_idx, caption)
                 if tgt_title_en_col_idx and title:
                     sheet.update_cell(r_i, tgt_title_en_col_idx, title)
 
@@ -4200,8 +4287,8 @@ def run_post_mode(args):
                     st = get_any(r, "STATUS", "STATU").lower()
                     if st.startswith("pending"):
                         continue
-                    img_val = get_any(r, "IMAGE_PATH", "IMG_LINK", "IMAGE", "IMAGE_URL")
-                    post_url_val = get_any(r, "POST_URL", "RESULT_URL", "RESULT URL")
+                    img_val = get_any(r, "IMGLINK", "IMGLink", "IMG_LINK", "IMAGE_PATH", "IMAGE", "IMAGE_URL")
+                    post_url_val = get_any(r, "POSTL", "POST_URL", "RESULT_URL", "RESULT URL")
                     if img_val:
                         posted_index.add(img_val)
                     if post_url_val:
@@ -4225,7 +4312,7 @@ def run_post_mode(args):
 
         if header_map:
             col_status = find_col("STATUS", "STATU", default_1_based=6)
-            col_post_url = find_col("POST_URL", "RESULT_URL", "RESULT URL", default_1_based=7)
+            col_post_url = find_col("POSTL", "POST_URL", "RESULT_URL", "RESULT URL", default_1_based=7)
             col_timestamp = find_col("TIMESTAMP", "TIME", default_1_based=8)
             col_notes = find_col("NOTES", "NOTE", default_1_based=9)
         else:
@@ -4236,6 +4323,23 @@ def run_post_mode(args):
             col_notes = 9
 
         pending = []
+        def normalize_status(value: str) -> str:
+            v = (value or "").strip()
+            if not v:
+                return ""
+            vv = v.lower()
+            if vv.startswith("pending"):
+                return "Pending"
+            if vv.startswith("done"):
+                return "Done"
+            if vv.startswith("failed"):
+                return "Failed"
+            if vv.startswith("repeating"):
+                return "Repeating"
+            if vv.startswith("skipped"):
+                return "Skipped"
+            return " ".join([w.capitalize() for w in re.split(r"\s+", v) if w])
+
         dup_skipped = 0
         for i, row in enumerate(all_rows[1:], start=2):
             if use_headers:
@@ -4243,19 +4347,20 @@ def run_post_mode(args):
                 status = get_any(row, "STATUS", "STATU").lower()
 
                 title_en = get_any(row, "TITLE", "TITLE_EN", "TITLE_ENG", "TITLE EN")
-                title_ur = get_any(row, "TITLE_UR", "TITLE_URDU", "TITLE UR", "CAPTION")
-                img_link = get_any(row, "IMAGE_PATH", "IMG_LINK", "IMAGE", "IMAGE_URL")
+                urdu_val = get_any(row, "URDU", "TITLE_UR", "TITLE_URDU", "TITLE UR", "CAPTION")
+                img_link = get_any(row, "IMGLINK", "IMGLink", "IMG_LINK", "IMAGE_PATH", "IMAGE", "IMAGE_URL")
+                signature = get_any(row, "SIGNATURE", "SIGN")
 
                 # User-defined PostQueue rules:
                 # - TYPE=text: use column TITLE as content
                 # - TYPE=image + STATUS=pending: use IMAGE_PATH as image URL and TITLE_UR as caption
                 if post_type == "text":
                     title = ""
-                    content = title_en
+                    content = urdu_val or title_en
                     image_path = ""
                 else:
                     title = title_en
-                    content = title_ur
+                    content = urdu_val
                     image_path = img_link
 
                 tags = get_any(row, "TAGS")
@@ -4269,6 +4374,7 @@ def run_post_mode(args):
                 tags = get_legacy(row, 4)
                 status = get_legacy(row, 5).lower()
                 notes_val = get_legacy(row, 8)
+                signature = ""
 
             if not post_type:
                 continue
@@ -4279,12 +4385,18 @@ def run_post_mode(args):
             if not should_run:
                 continue
 
+            if signature:
+                if content:
+                    content = f"{content}\n{signature}"
+                else:
+                    content = signature
+
             # Unified duplicate skip for image posts:
             # If the same IMAGE_PATH already appears in a non-pending row, don't attempt to post again.
             if use_headers and post_type != "text" and image_path and posted_index.contains(image_path):
                 dup_skipped += 1
                 try:
-                    sheets_mgr.update_cell(post_queue, i, col_status, "Skipped Duplicate")
+                    sheets_mgr.update_cell(post_queue, i, col_status, normalize_status("Skipped"))
                     sheets_mgr.update_cell(post_queue, i, col_notes, "Duplicate IMAGE_PATH already processed")
                 except Exception:
                     pass
@@ -4414,7 +4526,7 @@ def run_post_mode(args):
                             result_url = (result.get("url") if result else "") or ""
 
                             if status == "Rate Limited":
-                                sheets_mgr.update_cell(post_queue, post["row"], col_status, "Failed")
+                                sheets_mgr.update_cell(post_queue, post["row"], col_status, normalize_status("Failed"))
                                 sheets_mgr.update_cell(post_queue, post["row"], col_notes, "Rate limited")
                                 failed += 1
                                 post_history.record_post(
@@ -4430,7 +4542,7 @@ def run_post_mode(args):
 
                             if status == "Repeating":
                                 logger.warning("Duplicate image detected; permanently skipping this row (no retry)")
-                                sheets_mgr.update_cell(post_queue, post["row"], col_status, "Skipped")
+                                sheets_mgr.update_cell(post_queue, post["row"], col_status, normalize_status("Skipped"))
                                 sheets_mgr.update_cell(
                                     post_queue,
                                     post["row"],
@@ -4455,7 +4567,7 @@ def run_post_mode(args):
                                 break
 
                             if status in {"Denied", "Error"}:
-                                sheets_mgr.update_cell(post_queue, post["row"], col_status, "Failed")
+                                sheets_mgr.update_cell(post_queue, post["row"], col_status, normalize_status("Failed"))
                                 sheets_mgr.update_cell(
                                     post_queue,
                                     post["row"],
@@ -4479,7 +4591,7 @@ def run_post_mode(args):
                                 break
 
                             if status == "Dry Run" or "Posted" in status:
-                                sheets_mgr.update_cell(post_queue, post["row"], col_status, "Done")
+                                sheets_mgr.update_cell(post_queue, post["row"], col_status, normalize_status("Done"))
                                 if result_url:
                                     sheets_mgr.update_cell(post_queue, post["row"], col_post_url, result_url)
                                 sheets_mgr.update_cell(post_queue, post["row"], col_timestamp, timestamp)
