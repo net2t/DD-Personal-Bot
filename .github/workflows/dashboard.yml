@@ -1,63 +1,6 @@
 name: DamaDam Dashboard
 
-"on":
-  workflow_call:
-    inputs:
-      mode:
-        required: true
-        type: string
-      max_items:
-        required: false
-        type: string
-        default: ""
-      headless:
-        required: false
-        type: boolean
-        default: true
-      debug:
-        required: false
-        type: boolean
-        default: false
-    secrets:
-      DD_LOGIN_EMAIL:
-        required: true
-      DD_LOGIN_PASS:
-        required: true
-      DD_SHEET_ID:
-        required: true
-      GOOGLE_CREDENTIALS_JSON:
-        required: true
-
-  workflow_dispatch:
-    inputs:
-      mode:
-        description: "Run mode"
-        type: choice
-        required: true
-        default: msg
-        options:
-          - msg
-          - post
-          - rekhta
-          - inbox
-          - activity
-          - logs
-          - setup
-      max_items:
-        description: "--max N (empty = unlimited)"
-        type: string
-        required: false
-        default: ""
-      headless:
-        description: "Headless browser"
-        type: boolean
-        required: true
-        default: true
-      debug:
-        description: "Debug logging"
-        type: boolean
-        required: true
-        default: false
+on: []
 
 concurrency:
   group: damadam-${{ inputs.mode || github.event.inputs.mode || 'unknown' }}

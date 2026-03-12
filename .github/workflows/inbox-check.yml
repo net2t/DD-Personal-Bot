@@ -1,15 +1,6 @@
 name: Inbox Bot
 
-"on":
-  workflow_dispatch:
-    inputs:
-      debug:
-        description: "Debug logging"
-        type: boolean
-        required: true
-        default: false
-  schedule:
-    - cron: "*/30 * * * *"
+on: []
 
 jobs:
   run:

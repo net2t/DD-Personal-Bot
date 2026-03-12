@@ -1,20 +1,6 @@
 name: Posting Bot
 
-"on":
-  workflow_dispatch:
-    inputs:
-      max_items:
-        description: "Max posts to create (empty = all)"
-        type: string
-        required: false
-        default: ""
-      debug:
-        description: "Debug logging"
-        type: boolean
-        required: true
-        default: false
-  schedule:
-    - cron: "*/15 * * * *"
+on: []
 
 jobs:
   run:

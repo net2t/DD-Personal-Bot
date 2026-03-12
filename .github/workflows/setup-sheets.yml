@@ -1,25 +1,6 @@
 name: Setup Sheets
 
-"on":
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: "--dry-run"
-        type: boolean
-        required: true
-        default: false
-      headless:
-        description: "Headless browser"
-        type: boolean
-        required: true
-        default: true
-      debug:
-        description: "Debug logging"
-        type: boolean
-        required: true
-        default: false
-  schedule:
-    - cron: "0 0 * * *"
+on: []
 
 jobs:
   run:

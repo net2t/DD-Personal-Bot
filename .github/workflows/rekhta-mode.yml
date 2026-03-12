@@ -1,35 +1,6 @@
 name: Rekhta Mode
 
-"on":
-  workflow_dispatch:
-    inputs:
-      populate_limit:
-        description: "How many Rekhta items to scrape (--populate-limit). Empty = default"
-        type: string
-        required: false
-        default: ""
-      populate_write:
-        description: "Write to PostQueue (--populate-write)"
-        type: boolean
-        required: true
-        default: true
-      dry_run:
-        description: "--dry-run"
-        type: boolean
-        required: true
-        default: false
-      headless:
-        description: "Headless browser"
-        type: boolean
-        required: true
-        default: true
-      debug:
-        description: "Debug logging"
-        type: boolean
-        required: true
-        default: false
-  schedule:
-    - cron: "*/30 * * * *"
+on: []
 
 jobs:
   run:

@@ -1,18 +1,6 @@
 name: Rekhta Bot
 
-"on":
-  workflow_dispatch:
-    inputs:
-      max_items:
-        description: "Max new items to add (empty = all new)"
-        type: string
-        required: false
-        default: ""
-      debug:
-        description: "Debug logging"
-        type: boolean
-        required: true
-        default: false
+on: []
 
 jobs:
   run:
