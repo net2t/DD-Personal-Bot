@@ -6,23 +6,11 @@ name: DamaDam Dashboard
       mode:
         required: true
         type: string
-      max_profiles:
+      max_items:
         required: false
         type: string
         default: ""
       dry_run:
-        required: false
-        type: boolean
-        default: false
-      populate_img_links:
-        required: false
-        type: boolean
-        default: false
-      populate_limit:
-        required: false
-        type: string
-        default: ""
-      populate_write:
         required: false
         type: boolean
         default: false
@@ -43,58 +31,43 @@ name: DamaDam Dashboard
         required: true
       GOOGLE_CREDENTIALS_JSON:
         required: true
+
   workflow_dispatch:
     inputs:
       mode:
-        description: "Run mode (--mode)"
+        description: "Run mode"
         type: choice
         required: true
         default: msg
         options:
           - msg
           - post
-          - inbox
-          - populate
+          - rekhta
           - logs
           - setup
-      max_profiles:
-        description: "--max-profiles (empty = unlimited / all)"
+      max_items:
+        description: "--max N (empty = unlimited)"
         type: string
         required: false
         default: ""
       dry_run:
-        description: "--dry-run (no posting/sending + no sheet writes)"
-        type: boolean
-        required: true
-        default: false
-      populate_img_links:
-        description: "--populate-img-links (only used for post/populate flows)"
-        type: boolean
-        required: true
-        default: false
-      populate_limit:
-        description: "--populate-limit (only for populate mode; empty = default)"
-        type: string
-        required: false
-        default: ""
-      populate_write:
-        description: "--populate-write (only for populate mode)"
+        description: "--dry-run (simulate, no posting)"
         type: boolean
         required: true
         default: false
       headless:
-        description: "DD_HEADLESS env (headless chrome)"
+        description: "Headless browser"
         type: boolean
         required: true
         default: true
       debug:
-        description: "DD_DEBUG env (more logs)"
+        description: "Debug logging"
         type: boolean
         required: true
         default: false
 
 concurrency:
-  group: damadam-dashboard-${{ inputs.mode || github.event.inputs.mode || 'unknown' }}
+  group: damadam-${{ inputs.mode || github.event.inputs.mode || 'unknown' }}
   cancel-in-progress: true
 
 jobs:
@@ -116,8 +89,7 @@ jobs:
           sudo apt-get install -y google-chrome-stable
 
       - name: Verify Chrome
-        run: |
-          google-chrome --version
+        run: google-chrome --version
 
       - name: Install dependencies
         run: |
@@ -142,33 +114,22 @@ jobs:
           DD_LOGIN_EMAIL: ${{ secrets.DD_LOGIN_EMAIL }}
           DD_LOGIN_PASS:  ${{ secrets.DD_LOGIN_PASS }}
           DD_SHEET_ID:    ${{ secrets.DD_SHEET_ID }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
           DD_HEADLESS:    "${{ inputs.headless && '1' || '0' }}"
           DD_DEBUG:       "${{ inputs.debug && '1' || '0' }}"
         run: |
           set -euo pipefail
-
-          ARGS=("--mode" "${{ inputs.mode }}" "--no-menu")
-
-          if [ -n "${{ inputs.max_profiles }}" ]; then
-            ARGS+=("--max-profiles" "${{ inputs.max_profiles }}")
+          MODE="${{ inputs.mode }}"
+          ARGS=("$MODE")
+          if [ -n "${{ inputs.max_items }}" ]; then
+            ARGS+=("--max" "${{ inputs.max_items }}")
           fi
-
           if [ "${{ inputs.dry_run }}" = "true" ]; then
             ARGS+=("--dry-run")
           fi
-
-          if [ "${{ inputs.populate_img_links }}" = "true" ]; then
-            ARGS+=("--populate-img-links")
+          if [ "${{ inputs.debug }}" = "true" ]; then
+            ARGS+=("--debug")
           fi
-
-          if [ -n "${{ inputs.populate_limit }}" ]; then
-            ARGS+=("--populate-limit" "${{ inputs.populate_limit }}")
-          fi
-
-          if [ "${{ inputs.populate_write }}" = "true" ]; then
-            ARGS+=("--populate-write")
-          fi
-
           echo "Running: python main.py ${ARGS[*]}"
           python main.py "${ARGS[@]}"
 
@@ -176,5 +137,5 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: damadam-dashboard-logs-${{ github.run_number }}
+          name: logs-${{ inputs.mode }}-${{ github.run_number }}
           path: logs/*.log

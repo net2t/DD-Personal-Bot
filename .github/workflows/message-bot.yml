@@ -3,8 +3,8 @@ name: Message Bot
 "on":
   workflow_dispatch:
     inputs:
-      max_profiles:
-        description: "How many profiles/messages to process (--max-profiles). Empty = all"
+      max_items:
+        description: "Max messages to send (empty = all)"
         type: string
         required: false
         default: ""
@@ -24,18 +24,15 @@ name: Message Bot
         required: true
         default: false
   schedule:
-    - cron: "0 */1 * * *"  
+    - cron: "0 */1 * * *"
 
 jobs:
   run:
     uses: ./.github/workflows/dashboard.yml
     with:
       mode: msg
-      max_profiles: ${{ github.event.inputs.max_profiles || '' }}
-      dry_run: ${{ github.event.inputs.dry_run == true }}
-      populate_img_links: false
-      populate_limit: ""
-      populate_write: false
-      headless: ${{ github.event.inputs.headless != false }}
-      debug: ${{ github.event.inputs.debug == true }}
+      max_items: ${{ github.event.inputs.max_items || '' }}
+      dry_run: ${{ github.event.inputs.dry_run == 'true' }}
+      headless: ${{ github.event.inputs.headless != 'false' }}
+      debug: ${{ github.event.inputs.debug == 'true' }}
     secrets: inherit

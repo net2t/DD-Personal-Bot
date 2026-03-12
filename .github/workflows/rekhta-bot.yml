@@ -1,10 +1,10 @@
-name: Posting Bot
+name: Rekhta Bot
 
 "on":
   workflow_dispatch:
     inputs:
       max_items:
-        description: "Max posts to create (empty = all)"
+        description: "Max new items to add to PostQueue (empty = all new)"
         type: string
         required: false
         default: ""
@@ -13,26 +13,19 @@ name: Posting Bot
         type: boolean
         required: true
         default: false
-      headless:
-        description: "Headless browser"
-        type: boolean
-        required: true
-        default: true
       debug:
         description: "Debug logging"
         type: boolean
         required: true
         default: false
-  schedule:
-    - cron: "*/15 * * * *"
 
 jobs:
   run:
     uses: ./.github/workflows/dashboard.yml
     with:
-      mode: post
+      mode: rekhta
       max_items: ${{ github.event.inputs.max_items || '' }}
       dry_run: ${{ github.event.inputs.dry_run == 'true' }}
-      headless: ${{ github.event.inputs.headless != 'false' }}
+      headless: true
       debug: ${{ github.event.inputs.debug == 'true' }}
     secrets: inherit
