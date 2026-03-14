@@ -47,15 +47,12 @@ _URL_IMAGE_UPLOAD = f"{Config.BASE_URL}/share/photo/upload/"
 _URL_TEXT_SHARE   = f"{Config.BASE_URL}/share/text/"
 
 # ── Selectors for the share forms ─────────────────────────────────────────────
-# Page-wide file input search - look for file inputs anywhere on page
-_SEL_FILE_INPUT  = "input[type='file'], input[name='file'], input[name='image'], input[type='file'][accept*='image']"
-# Multiple caption textarea selectors - more comprehensive textarea detection
-_SEL_CAPTION     = "textarea, textarea[name='caption'], textarea[name='description'], textarea[name='text'], textarea[id*='caption'], textarea[id*='description'], textarea[class*='caption'], textarea[class*='text']"
+_SEL_FILE_INPUT  = "input[type='file'], input[name='file'], input[name='image']"
+_SEL_CAPTION     = "textarea"
 _SEL_TITLE_INPUT = "input[name='title'], #id_title"
 _SEL_TAGS_INPUT  = "input[name='tags'], #id_tags"
 _SEL_TEXT_AREA   = "textarea[name='text'], #id_text, textarea[name='content'], textarea"
-# Smarter submit detection - more comprehensive submit button selectors
-_SEL_SUBMIT      = "button[type='submit'], input[type='submit'], button.btn-primary, button.btn, button:contains('Post'), button:contains('Share'), button:contains('Upload'), [type='submit'], .submit-btn, .upload-btn, .post-btn"
+_SEL_SUBMIT      = "button[type='submit'], input[type='submit'], button.btn-primary"
 
 
 def run(driver, sheets: SheetsManager, logger: Logger,
@@ -311,7 +308,6 @@ def _create_image_post(driver, img_url: str, caption: str,
         file_input = form.find_element(By.CSS_SELECTOR, _SEL_FILE_INPUT)
         abs_path   = os.path.abspath(tmp_path)
         file_input.send_keys(abs_path)
-        
         # Wait for the file input to register the file
         try:
             WebDriverWait(driver, 15).until(
@@ -319,86 +315,26 @@ def _create_image_post(driver, img_url: str, caption: str,
             )
         except Exception:
             pass
-        
-        # Wait for upload preview before caption - wait for image preview to appear
-        logger.debug("Waiting for upload preview...")
-        preview_loaded = _wait_for_upload_preview(driver, timeout=15)
-        if not preview_loaded:
-            logger.warning("Upload preview not detected, proceeding anyway...")
         time.sleep(2)
 
-        # -- Fill caption (Urdu text) with multiple textarea selectors -------------
+        # -- Fill caption (Urdu text) -----------------------------------------
         clean_cap = sanitize_caption(strip_non_bmp(caption))
         if clean_cap:
-            caption_filled = False
-            # Try multiple caption textarea selectors
-            caption_selectors = [
-                "textarea[name='caption']", "textarea[name='description']", 
-                "textarea[id*='caption']", "textarea[id*='description']",
-                "textarea[class*='caption']", "textarea[class*='text']",
-                "textarea", "textarea[name='text']"
-            ]
-            
-            for selector in caption_selectors:
-                try:
-                    cap_area = form.find_element(By.CSS_SELECTOR, selector)
-                    cap_area.clear()
-                    cap_area.send_keys(clean_cap)
-                    caption_filled = True
-                    logger.debug(f"Caption filled using selector: {selector}")
-                    break
-                except Exception:
-                    continue
-            
-            if not caption_filled:
-                logger.warning("Could not find caption textarea, skipping caption...")
+            try:
+                cap_area = form.find_element(By.CSS_SELECTOR, _SEL_CAPTION)
+                cap_area.clear()
+                cap_area.send_keys(clean_cap)
+            except Exception:
+                pass
 
         # -- Set post options (never expire, allow comments) ------------------
         _set_radio(driver, form, "exp", "i")   # Never expire
         _set_radio(driver, form, "com", "0")   # Allow comments
 
-        # -- Submit with smarter submit detection ---------------------------
-        submit_found = False
-        submit_selectors = [
-            "button[type='submit']", "input[type='submit']", "button.btn-primary", 
-            "button.btn", "button:contains('Post')", "button:contains('Share')", 
-            "button:contains('Upload')", "[type='submit']", ".submit-btn", ".upload-btn", ".post-btn",
-            "button", "input[type='button']"  # fallbacks
-        ]
-        
-        for selector in submit_selectors:
-            try:
-                submit_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                for submit in submit_elements:
-                    try:
-                        # Check if button is visible and clickable
-                        if submit.is_displayed() and submit.is_enabled():
-                            # For buttons with text, check for relevant text
-                            text = submit.text.lower()
-                            if any(keyword in text for keyword in ['post', 'share', 'upload', 'submit', 'send']):
-                                logger.debug(f"Submitting using button: {text} (selector: {selector})")
-                                driver.execute_script("arguments[0].click();", submit)
-                                submit_found = True
-                                break
-                        elif selector in ["button[type='submit']", "input[type='submit']", "[type='submit']"]:
-                            # Always try explicit submit buttons
-                            logger.debug(f"Submitting using explicit submit button (selector: {selector})")
-                            driver.execute_script("arguments[0].click();", submit)
-                            submit_found = True
-                            break
-                    except Exception:
-                        continue
-                if submit_found:
-                    break
-            except Exception:
-                continue
-        
-        if not submit_found:
-            logger.warning("Could not find submit button, trying form submit...")
-            try:
-                driver.execute_script("document.querySelector('form').submit();")
-            except Exception as e:
-                return {"status": f"Submit Error: {str(e)[:40]}", "url": ""}
+        # -- Submit -----------------------------------------------------------
+        submit = form.find_element(By.CSS_SELECTOR, _SEL_SUBMIT)
+        logger.debug("Submitting image post...")
+        driver.execute_script("arguments[0].click();", submit)
         try:
             WebDriverWait(driver, 15).until(
                 lambda d: d.current_url != _URL_IMAGE_UPLOAD
@@ -406,12 +342,6 @@ def _create_image_post(driver, img_url: str, caption: str,
         except TimeoutException:
             pass
         time.sleep(2)
-
-        # -- Error message extraction on upload failure ----------------------
-        upload_error = _extract_upload_error(driver)
-        if upload_error:
-            logger.error(f"Upload error detected: {upload_error}")
-            return {"status": f"Upload Failed: {upload_error}", "url": driver.current_url}
 
         # -- Detect issues ----------------------------------------------------
         page = driver.page_source.lower()
@@ -519,10 +449,8 @@ def _find_share_form(driver, require_file: bool = False):
     """
     Find the share/upload form on the current page.
     If require_file=True, only returns forms that contain a file input.
-    Enhanced to perform page-wide file input search when needed.
     """
     try:
-        # First try to find forms normally
         forms = driver.find_elements(By.CSS_SELECTOR, "form")
         for form in forms:
             try:
@@ -534,98 +462,9 @@ def _find_share_form(driver, require_file: bool = False):
                 return form
             except Exception:
                 continue
-        
-        # If no form found and file input is required, do page-wide search
-        if require_file:
-            try:
-                # Look for file inputs anywhere on the page
-                file_inputs = driver.find_elements(By.CSS_SELECTOR, _SEL_FILE_INPUT)
-                for file_input in file_inputs:
-                    # Find the closest form parent
-                    form = file_input.find_element(By.XPATH, "./ancestor::form")
-                    if form:
-                        return form
-            except Exception:
-                pass
-        
         return None
     except Exception:
         return None
-
-
-def _wait_for_upload_preview(driver, timeout: int = 15) -> bool:
-    """
-    Wait for image upload preview to appear on the page.
-    Returns True if preview is detected, False if timeout occurs.
-    """
-    try:
-        # Look for common preview indicators
-        preview_selectors = [
-            "img[src*='temp']", "img[src*='upload']", "img[src*='preview']",
-            ".preview img", ".upload-preview img", ".image-preview img",
-            "[class*='preview'] img", "[id*='preview'] img",
-            ".file-preview", ".upload-success", ".image-loaded"
-        ]
-        
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            for selector in preview_selectors:
-                try:
-                    elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                    for element in elements:
-                        # Check if image has a valid src attribute
-                        src = element.get_attribute("src")
-                        if src and ("data:" in src or "http" in src):
-                            return True
-                except Exception:
-                    continue
-            time.sleep(0.5)
-        return False
-    except Exception:
-        return False
-
-
-def _extract_upload_error(driver) -> str:
-    """
-    Extract error messages from the page after upload failure.
-    Returns the error message string or empty string if no error found.
-    """
-    try:
-        # Common error selectors
-        error_selectors = [
-            ".error", ".alert-danger", ".alert-error", ".message.error",
-            "[class*='error']", "[id*='error']", '.toast-error', '.notification-error',
-            '.upload-error', '.file-error', '.response-error'
-        ]
-        
-        for selector in error_selectors:
-            try:
-                elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                for element in elements:
-                    text = element.text.strip()
-                    if text and len(text) > 0:
-                        return text[:100]  # Limit error message length
-            except Exception:
-                continue
-        
-        # Also check page source for error patterns
-        page_source = driver.page_source.lower()
-        error_patterns = [
-            "error", "failed", "invalid", "too large", "format not supported",
-            "upload failed", "file too big", "unsupported", "corrupt"
-        ]
-        
-        for pattern in error_patterns:
-            if pattern in page_source:
-                # Try to extract context around the error
-                import re
-                matches = re.findall(rf".{0,50}{pattern}.{0,50}", page_source)
-                if matches:
-                    return matches[0][:100]
-        
-        return ""
-    except Exception:
-        return ""
 
 
 def _set_radio(driver, form, name: str, value: str):
