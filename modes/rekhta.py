@@ -26,6 +26,7 @@ Card HTML structure (from provided HTML):
 import re
 import time
 from typing import List, Dict, Set, Optional
+from urllib.parse import urljoin, urlparse
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -73,171 +74,128 @@ def run(driver, sheets: SheetsManager, logger: Logger,
                 existing_img_links.add(_normalize_img_url(v))
         logger.info(f"Existing PostQueue entries: {len(existing_img_links)} image URLs loaded")
 
-    # ── Scrape Rekhta listing page ────────────────────────────────────────────
-    logger.info(f"Opening: {Config.REKHTA_URL}")
-    try:
-        driver.get(Config.REKHTA_URL)
-    except TimeoutException as e:
-        # Chrome sometimes throws "Timed out receiving message from renderer" on heavy pages.
-        # Retry once with a higher timeout.
-        try:
-            driver.execute_script("window.stop();")
-        except Exception:
-            pass
-        try:
-            driver.set_page_load_timeout(max(60, int(getattr(Config, "PAGE_LOAD_TIMEOUT", 15) or 15)))
-        except Exception:
-            pass
-        logger.warning(f"Page load timeout opening Rekhta; retrying once: {e}")
-        driver.get(Config.REKHTA_URL)
-    time.sleep(4)
-
-    # Scroll down to load more cards
-    # The page uses infinite scroll — each scroll loads approximately 9–12 more cards
-    # If max_items is provided, keep scrolling until we have loaded enough cards
-    # (or until no new cards load for a few scrolls).
-    target_cards = max_items if max_items and max_items > 0 else None
-    max_scrolls = Config.REKHTA_MAX_SCROLLS
-    if target_cards:
-        # Heuristic: ensure we have enough scroll budget for large targets.
-        # We still keep Config.REKHTA_MAX_SCROLLS as a minimum, not a strict cap.
-        max_scrolls = max(max_scrolls, int(target_cards / 8) + 2)
-
-    try:
-        prev_count = len(driver.find_elements(By.CSS_SELECTOR, "div.shyriImgBox"))
-    except Exception:
-        prev_count = 0
-    stagnant = 0
-    max_stagnant = 20 if target_cards else 3
-    for scroll_num in range(1, max_scrolls + 1):
-        # Some sites don't reliably trigger infinite-load on JS scrollTo alone.
-        # We combine END key + incremental scroll to mimic a real user.
-        try:
-            body = driver.find_element(By.TAG_NAME, "body")
-            body.send_keys(Keys.END)
-        except Exception:
-            pass
-
-        for _ in range(3):
-            driver.execute_script("window.scrollBy(0, 1200);")
-
-        # Wait a bit for new cards to load. Rekhta sometimes loads slowly.
-        # We'll poll for a short window before deciding that nothing new loaded.
-        count_now = 0
-        for _ in range(10):
-            time.sleep(0.6)
-            try:
-                cards_now = driver.find_elements(By.CSS_SELECTOR, "div.shyriImgBox")
-                count_now = len(cards_now)
-            except Exception:
-                count_now = 0
-            if count_now > prev_count:
-                break
-
-        if count_now <= prev_count:
-            stagnant += 1
-            # Adaptive backoff if the page is slow to load additional batches.
-            time.sleep(min(1.5 * stagnant, 6))
-        else:
-            stagnant = 0
-            prev_count = count_now
-
-        if target_cards and count_now >= target_cards:
-            logger.debug(f"Loaded {count_now} cards (target {target_cards}) — stopping scroll")
-            break
-        if stagnant >= max_stagnant:
-            logger.debug(f"No new cards after {stagnant} scrolls — stopping scroll")
-            break
-
-        logger.debug(f"Scroll {scroll_num}/{max_scrolls} done — cards: {count_now}")
-
-    # ── Parse all cards ───────────────────────────────────────────────────────
-    logger.info("Parsing poetry cards...")
-    cards = driver.find_elements(By.CSS_SELECTOR, "div.shyriImgBox")
-    logger.info(f"Found {len(cards)} cards on page")
-
-    scraped: List[Dict] = []
-    for card in cards:
-        item = _parse_card(card, logger)
-        if item:
-            scraped.append(item)
-
-    logger.info(f"Successfully parsed {len(scraped)} cards")
-
-    # ── Filter duplicates and apply limit ────────────────────────────────────
-    new_items: List[Dict] = []
+    # ── Scrape Rekhta pages via CollectionLoading (no scroll automation) ─────
+    # The listing uses an HTML fragment loader:
+    #   /CollectionLoading?lang=1&pageType=shayariImage&contentType=&keyword=&pageIndex=N
+    # This is easier to replay, and allows resuming safely because we dedupe
+    # against what's already in the sheet.
+    total_pages = max(1, int(getattr(Config, "REKHTA_MAX_SCROLLS", 6) or 6))
+    if max_items and max_items > 0:
+        # Ensure we have enough paging budget to fulfill the user's requested count.
+        # A page typically contains ~9–12 cards; we use 8 as a conservative lower bound.
+        total_pages = max(total_pages, int(max_items / 8) + 5)
+    base_url = "https://www.rekhta.org"
+    added = 0
     dup_count = 0
+    total_scraped = 0
     # Track roman_text seen in THIS run to catch same poem with different image variants
     seen_texts: Set[str] = set()
+    no_new_pages = 0
+    max_no_new_pages = 2
 
-    for item in scraped:
-        norm_url  = _normalize_img_url(item["img_link"])
-        norm_text = item["roman_text"].strip().lower()[:60]  # first 60 chars as key
-
-        # Skip if image URL already in sheet
-        if norm_url in existing_img_links:
-            dup_count += 1
+    for page_index in range(1, total_pages + 1):
+        page_url = _rekhta_page_url(page_index)
+        logger.info(f"Loading page {page_index}/{total_pages}: {page_url}")
+        try:
+            driver.get(page_url)
+        except TimeoutException as e:
+            try:
+                driver.execute_script("window.stop();")
+            except Exception:
+                pass
+            logger.warning(f"Page load timeout loading Rekhta pageIndex={page_index}; skipping: {e}")
             continue
-        # Skip if same poem text already added in this run (Rekhta shows same card multiple times)
-        if norm_text and norm_text in seen_texts:
-            dup_count += 1
-            continue
 
-        new_items.append(item)
-        existing_img_links.add(norm_url)
-        seen_texts.add(norm_text)
-        if max_items and len(new_items) >= max_items:
+        time.sleep(2.0)
+
+        cards = driver.find_elements(By.CSS_SELECTOR, "div.shyriImgBox")
+        logger.debug(f"Cards found on pageIndex={page_index}: {len(cards)}")
+
+        if not cards:
+            logger.debug(f"No cards found on pageIndex={page_index}; stopping")
             break
 
-    logger.info(f"New: {len(new_items)} | Duplicates skipped: {dup_count}")
+        page_new_added = 0
+        for card in cards:
+            item = _parse_card_elem(card, logger, base_url=base_url)
+            if not item:
+                continue
 
-    if not new_items:
-        logger.info("No new items to add — PostQueue is up to date")
-        return {"added": 0, "skipped_dup": dup_count, "total_scraped": len(scraped)}
+            total_scraped += 1
+            norm_url  = _normalize_img_url(item["img_link"])
+            norm_text = item["roman_text"].strip().lower()[:60]
 
-    # ── Append to sheet (Urdu column uses GOOGLETRANSLATE formula) ──────────
-    added = 0
-    for idx, item in enumerate(new_items, start=1):
-        logger.info(f"[{idx}/{len(new_items)}] Adding: {item['roman_text'][:50]}...")
+            if norm_url in existing_img_links:
+                dup_count += 1
+                continue
+            if norm_text and norm_text in seen_texts:
+                dup_count += 1
+                continue
 
-        # Column D (URDU) formula: translate Column C (TITLE) for the same row.
-        # Using INDIRECT+ROW avoids hardcoding the row number.
-        urdu_formula = (
-            '=GOOGLETRANSLATE('
-            'INDIRECT("C"&ROW())&" - by "&INDIRECT("F"&ROW()),'
-            '"en","ur")'
-        )
+            # ── Append to sheet (Urdu column uses GOOGLETRANSLATE formula) ──
+            logger.info(f"Adding: {item['roman_text'][:50]}...")
 
-        title = item["roman_text"].strip()
+            # Column D (URDU) formula: translate Column C (TITLE) for the same row.
+            # Using INDIRECT+ROW avoids hardcoding the row number.
+            urdu_formula = (
+                '=GOOGLETRANSLATE('
+                'INDIRECT("C"&ROW())&" - by "&INDIRECT("F"&ROW()),'
+                '"en","ur")'
+            )
 
-        # Build the row matching Config.POST_QUE_COLS order:
-        # STATUS, TYPE, TITLE, URDU, IMG_LINK, POET, POST_URL, ADDED, NOTES
-        row_values = [
-            "Pending",              # STATUS
-            "image",               # TYPE
-            title,                  # TITLE (Roman Urdu — kept for reference)
-            urdu_formula,          # URDU  (Sheets formula)
-            item["img_link"],      # IMG_LINK
-            item["poet"],          # POET
-            "",                    # POST_URL (empty until posted)
-            pkt_stamp(),           # ADDED timestamp
-            "",                    # NOTES
-        ]
+            title = item["roman_text"].strip()
 
-        if sheets.append_row(ws, row_values):
-            added += 1
-            logger.ok(f"Added: {item['poet']} — {item['roman_text'][:40]}")
+            # Build the row matching Config.POST_QUE_COLS order:
+            # STATUS, TYPE, TITLE, URDU, IMG_LINK, POET, POST_URL, ADDED, NOTES
+            row_values = [
+                "Pending",              # STATUS
+                "image",               # TYPE
+                title,                  # TITLE (Column C)
+                urdu_formula,           # URDU
+                item["img_link"],      # IMG_LINK (Column E)
+                item["poet"],          # POET (Column F)
+                "",                    # POST_URL
+                pkt_stamp(),            # ADDED
+                "",                    # NOTES
+            ]
+
+            if sheets.append_row(ws, row_values):
+                added += 1
+                page_new_added += 1
+                existing_img_links.add(norm_url)
+                seen_texts.add(norm_text)
+                logger.ok(f"Added: {item['poet']} — {item['roman_text'][:40]}")
+            else:
+                logger.error(f"Failed to append row for: {item['roman_text'][:40]}")
+
+            # Small delay to avoid Sheets API quota exhaustion
+            time.sleep(0.5)
+
+            if max_items and added >= max_items:
+                logger.debug(f"Reached max_items={max_items}; stopping")
+                break
+
+        if max_items and added >= max_items:
+            break
+
+        # Resume behavior (only when max_items is unlimited):
+        # stop after a couple consecutive pages with 0 new additions.
+        if page_new_added == 0 and page_index > 1:
+            no_new_pages += 1
+            if not max_items and no_new_pages >= max_no_new_pages:
+                logger.info(
+                    f"No new items on {no_new_pages} consecutive page(s) "
+                    f"(last pageIndex={page_index}); stopping (resume/dedupe)"
+                )
+                break
         else:
-            logger.error(f"Failed to append row for: {item['roman_text'][:40]}")
-
-        # Small delay to avoid Sheets API quota exhaustion
-        time.sleep(0.5)
+            no_new_pages = 0
 
     logger.section(
         f"REKHTA MODE DONE — Added:{added}  "
-        f"Duplicates skipped:{dup_count}  Total scraped:{len(scraped)}"
+        f"Duplicates skipped:{dup_count}  Total scraped:{total_scraped}"
     )
-    return {"added": added, "skipped_dup": dup_count, "total_scraped": len(scraped)}
+    return {"added": added, "skipped_dup": dup_count, "total_scraped": total_scraped}
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -245,35 +203,33 @@ def run(driver, sheets: SheetsManager, logger: Logger,
 #  Extracts image URL, Roman Urdu text, and poet name from one card element.
 # ════════════════════════════════════════════════════════════════════════════════
 
-def _parse_card(card, logger: Logger) -> Optional[Dict]:
-    """
-    Parse one div.shyriImgBox card element.
-
-    Returns dict with keys: img_link, roman_text, poet
-    Returns None if any required field is missing.
-    """
+def _parse_card_elem(card, logger: Logger, base_url: str) -> Optional[Dict]:
+    """Parse one div.shyriImgBox card element."""
     try:
-        img_link  = _extract_image_url(card)
+        detail_url = _extract_detail_url(card, base_url=base_url)
         roman_text = _extract_roman_text(card)
         poet       = _extract_poet_name(card)
 
-        if not img_link:
-            return None
         if not roman_text:
             return None
 
-        return {
-            "img_link":   img_link,
-            "roman_text": roman_text.strip(),
-            "poet":       poet.strip() if poet else "",
-        }
+        # Prefer deterministic large image URL derived from the shayari-image slug.
+        img_link = _extract_image_url(card, detail_url=detail_url)
+        if not img_link:
+            return None
 
+        return {
+            "img_link":    img_link,
+            "roman_text":  roman_text.strip(),
+            "poet":        poet.strip() if poet else "",
+            "detail_url":  detail_url or "",
+        }
     except Exception as e:
         logger.debug(f"Card parse error: {e}")
         return None
 
 
-def _extract_image_url(card) -> str:
+def _extract_image_url(card, detail_url: str = "") -> str:
     """
     Extract the best available image URL from a card.
 
@@ -285,7 +241,12 @@ def _extract_image_url(card) -> str:
 
     Always prefer the largest available size.
     """
-    # Strategy 1: img[data-src] — the actual lazy-loaded URL (best quality)
+    # Strategy 0: build large URL from the shayari-image detail URL if available
+    large_from_detail = _build_large_image_url(detail_url)
+    if large_from_detail:
+        return large_from_detail
+
+    # Strategy 1: img[data-src] — the actual lazy-loaded URL
     try:
         img = card.find_element(By.CSS_SELECTOR, "div.shyriImg img")
         data_src = (img.get_attribute("data-src") or "").strip()
@@ -316,6 +277,44 @@ def _extract_image_url(card) -> str:
         pass
 
     return ""
+
+
+def _extract_detail_url(card, base_url: str) -> str:
+    """Extract the /shayari-image/... detail page link from a card."""
+    try:
+        a = card.find_element(By.CSS_SELECTOR, "a.shyriImgInner")
+        href = (a.get_attribute("href") or "").strip()
+        if not href:
+            return ""
+        # Selenium sometimes returns relative hrefs
+        return urljoin(base_url, href)
+    except Exception:
+        return ""
+
+
+def _rekhta_page_url(page_index: int) -> str:
+    """Return the URL to load for a given pageIndex of Rekhta shayari-image."""
+    if page_index <= 1:
+        return Config.REKHTA_URL
+    return (
+        "https://www.rekhta.org/CollectionLoading"
+        f"?lang=1&pageType=shayariImage&contentType=&keyword=&pageIndex={page_index}"
+    )
+
+
+def _build_large_image_url(detail_url: str) -> str:
+    """Derive the _large.png image URL from a /shayari-image/... detail URL."""
+    if not detail_url:
+        return ""
+    try:
+        p = urlparse(detail_url)
+        slug = p.path.strip("/").split("/")[-1]
+        if not slug:
+            return ""
+        # Rekhta uses /images/shayariimages/<slug>_large.(png|jpg)
+        return f"https://www.rekhta.org/images/shayariimages/{slug}_large.png"
+    except Exception:
+        return ""
 
 
 def _upgrade_image_size(url: str) -> str:
