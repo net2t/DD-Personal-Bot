@@ -42,6 +42,29 @@ from utils.helpers import (
 from core.sheets import SheetsManager
 
 
+def _dump_debug_artifacts(driver, logger: Logger, label: str) -> None:
+    try:
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        base = os.path.join(str(Config.LOG_DIR), f"post_debug_{ts}_{label}")
+        png_path = base + ".png"
+        html_path = base + ".html"
+
+        try:
+            driver.save_screenshot(png_path)
+            logger.debug(f"Saved screenshot: {png_path}")
+        except Exception as e:
+            logger.debug(f"Screenshot failed: {e}")
+
+        try:
+            with open(html_path, "w", encoding="utf-8") as f:
+                f.write(driver.page_source or "")
+            logger.debug(f"Saved HTML: {html_path}")
+        except Exception as e:
+            logger.debug(f"HTML dump failed: {e}")
+    except Exception:
+        pass
+
+
 # ── DamaDam share page URLs ────────────────────────────────────────────────────
 _URL_IMAGE_UPLOAD = f"{Config.BASE_URL}/share/photo/upload/"
 _URL_TEXT_SHARE   = f"{Config.BASE_URL}/share/text/"
@@ -55,8 +78,38 @@ _SEL_TEXT_AREA   = "textarea[name='text'], #id_text, textarea[name='content'], t
 _SEL_SUBMIT      = "button[type='submit'], input[type='submit'], button.btn-primary"
 
 
+def _share_page_preflight(driver, logger: Logger, expected_path_contains: str) -> Optional[Dict]:
+    """Validate we are on the expected share page and not redirected to login/denied."""
+    try:
+        cur = (driver.current_url or "").lower()
+        if "login" in cur:
+            if Config.DEBUG:
+                _dump_debug_artifacts(driver, logger, "redirected_to_login")
+            return {"status": "Login Required", "url": driver.current_url}
+        if "denied" in cur or "access" in cur and "denied" in (driver.page_source or "").lower():
+            if Config.DEBUG:
+                _dump_debug_artifacts(driver, logger, "access_denied")
+            return {"status": "Denied", "url": driver.current_url}
+        if expected_path_contains and expected_path_contains not in cur:
+            # Not a hard fail (site may redirect) but capture for debugging
+            if Config.DEBUG:
+                _dump_debug_artifacts(driver, logger, "unexpected_share_url")
+        # CSRF token is often provided as hidden input; if missing, form post may fail
+        try:
+            csrf_inputs = driver.find_elements(By.CSS_SELECTOR, "input[name='csrfmiddlewaretoken']")
+            if not csrf_inputs and Config.DEBUG:
+                _dump_debug_artifacts(driver, logger, "csrf_missing")
+        except Exception:
+            pass
+        return None
+    except Exception:
+        return None
+
+
 def run(driver, sheets: SheetsManager, logger: Logger,
-        max_posts: int = 0) -> Dict:
+        max_posts: int = 0,
+        stop_on_fail: bool = False,
+        force_wait: int | None = None) -> Dict:
     """
     Run Post Mode end-to-end.
 
@@ -82,6 +135,7 @@ def run(driver, sheets: SheetsManager, logger: Logger,
         logger.info("PostQueue is empty — nothing to do")
         return {"posted": 0, "skipped": 0, "failed": 0, "total": 0}
 
+    # ── Parse headers ─────────────────────────────────────────────────────────
     headers    = all_rows[0]
     header_map = SheetsManager.build_header_map(headers)
 
@@ -97,16 +151,49 @@ def run(driver, sheets: SheetsManager, logger: Logger,
     def cell(row, *names):
         return SheetsManager.get_cell(row, header_map, *names)
 
+    # ── Pre-run cooldown check (avoid immediate rate limit) ───────────────────
+    if not Config.DRY_RUN:
+        now = time.time()
+        # Find the most recent Done row timestamp in PostQueue
+        recent_done_ts = None
+        if col_status and col_notes:
+            for row in all_rows[1:]:
+                if cell(row, "STATUS").lower() == "done":
+                    notes = cell(row, "NOTES")
+                    # Look for "Posted @ PKT" pattern in notes
+                    m = re.search(r"Posted @ \d{2}-\w{3}-\d{2} \d{1,2}:\d{2}:\d{2} [AP]M", notes)
+                    if m:
+                        try:
+                            ts_str = m.group(0).replace("Posted @ ", "")
+                            dt = datetime.strptime(ts_str, "%d-%b-%y %I:%M:%S %p")
+                            dt = dt.replace(tzinfo=PKT)
+                            recent_done_ts = dt.timestamp()
+                            break
+                        except Exception:
+                            continue
+        if recent_done_ts:
+            elapsed = now - recent_done_ts
+            required = Config.POST_COOLDOWN_SECONDS
+            if elapsed < required:
+                wait = required - elapsed
+                logger.info(f"Pre-run cooldown: waiting {wait:.0f}s before starting...")
+                time.sleep(wait)
+
+    # ── Force wait (manual override) ───────────────────────────────────────────
+    if force_wait is not None and force_wait > 0 and not Config.DRY_RUN:
+        logger.info(f"Force wait: waiting {force_wait}s before starting...")
+        time.sleep(force_wait)
+
     # ── Build duplicate index (BATCH — all at once) ───────────────────────────
-    # Load ALL values in the IMG_LINK column that are already Done/Failed/Repeating
-    # This avoids the old O(n²) per-row comparison.
+    # Load IMG_LINK values only from rows that are marked Done (successful posts).
+    # This avoids treating Failed/Skipped rows as duplicates.
     col_img_link = sheets.get_col(headers, "IMG_LINK")
     posted_urls: Set[str] = set()
     if col_img_link:
         for row in all_rows[1:]:
             st = cell(row, "STATUS").lower()
-            if st.startswith("pending"):
-                continue  # pending rows are not "done"
+            if st != "done":
+                continue  # only truly successful posts count as duplicates
             img = cell(row, "IMG_LINK")
             if img:
                 posted_urls.add(img.lower())
@@ -225,10 +312,32 @@ def run(driver, sheets: SheetsManager, logger: Logger,
             last_post_time = time.time()
             stats["posted"] += 1
 
+        elif status == "Dry Run":
+            logger.info(f"Row {row_num} — dry run (not submitted)")
+            sheets.update_row_cells(ws, row_num, {
+                col_status: "Skipped",
+                col_notes:  "Dry run — not submitted",
+            })
+            stats["skipped"] += 1
+
         elif status == "Rate Limited":
-            # DamaDam returned a rate limit — wait the required time then retry ONCE
-            wait = wait_s or Config.POST_COOLDOWN_SECONDS
-            logger.warning(f"Rate limited — waiting {wait}s then retrying once...")
+            # DamaDam returned a rate limit.
+            # If stop_on_fail is enabled, don't waste time waiting — stop immediately.
+            if stop_on_fail:
+                logger.warning("Rate limited — stop-on-fail enabled, leaving row Pending for later")
+                sheets.update_row_cells(ws, row_num, {
+                    col_status: "Pending (RateLimited)",
+                    col_notes:  f"Rate limited @ {pkt_stamp()}",
+                })
+                stats["skipped"] += 1
+                break
+
+            # Otherwise: wait then retry ONCE.
+            # Use whichever is LARGER: the page-detected wait, or 5 minutes minimum.
+            # DamaDam's actual cooldown is often 5-10 minutes — 2 minutes is not enough.
+            MIN_RATE_LIMIT_WAIT = 300  # 5 minutes minimum
+            wait = max(wait_s or 0, Config.POST_COOLDOWN_SECONDS, MIN_RATE_LIMIT_WAIT) + 30
+            logger.warning(f"Rate limited — waiting {wait}s ({wait//60:.0f}m {wait%60:.0f}s) then retrying once...")
             time.sleep(wait)
             if post_type == "image":
                 result2 = _create_image_post(driver, img_link, caption, logger)
@@ -245,12 +354,28 @@ def run(driver, sheets: SheetsManager, logger: Logger,
                 last_post_time = time.time()
                 stats["posted"] += 1
             else:
-                logger.error(f"Retry also failed: {result2.get('status')}")
-                sheets.update_row_cells(ws, row_num, {
-                    col_status: "Failed",
-                    col_notes:  f"Rate limited, retry: {result2.get('status', 'Error')}",
-                })
-                stats["failed"] += 1
+                st2 = result2.get("status", "Error")
+                if st2 == "Rate Limited":
+                    # Still rate limited after the extended wait — DamaDam is heavily throttling.
+                    # Leave the row as Pending and stop all further processing this run.
+                    # Do NOT mark as Failed — it will be retried next time the bot runs.
+                    logger.warning("Still rate limited after retry — DamaDam is throttling heavily. Stopping this run.")
+                    sheets.update_row_cells(ws, row_num, {
+                        col_status: "Pending (RateLimited)",
+                        col_notes:  f"Rate limited twice @ {pkt_stamp()}",
+                    })
+                    stats["skipped"] += 1
+                    break  # Stop all further posts — site is throttled, no point continuing
+                else:
+                    logger.error(f"Retry also failed: {st2}")
+                    sheets.update_row_cells(ws, row_num, {
+                        col_status: "Failed",
+                        col_notes:  f"Rate limited, retry: {st2}",
+                    })
+                    stats["failed"] += 1
+                    if stop_on_fail:
+                        logger.warning("Stop-on-fail enabled — stopping after failure")
+                        break
 
         elif status == "Repeating":
             # DamaDam detected this as a duplicate image — do NOT retry
@@ -270,6 +395,9 @@ def run(driver, sheets: SheetsManager, logger: Logger,
             })
             sheets.log_action("POST", f"post_{post_type}", "", post_url, "Failed", status)
             stats["failed"] += 1
+            if stop_on_fail:
+                logger.warning("Stop-on-fail enabled — stopping after failure")
+                break
 
     logger.section(
         f"POST MODE DONE — Posted:{stats['posted']}  "
@@ -307,6 +435,10 @@ def _create_image_post(driver, img_url: str, caption: str,
 
         # -- Open upload page -------------------------------------------------
         driver.get(_URL_IMAGE_UPLOAD)
+        time.sleep(1)
+        pre = _share_page_preflight(driver, logger, "/share/photo/upload")
+        if pre:
+            return pre
         # Wait for the page to fully load — specifically for the file input
         try:
             WebDriverWait(driver, 15).until(
@@ -428,6 +560,11 @@ def _create_image_post(driver, img_url: str, caption: str,
         if not submit:
             return {"status": "Form Error: no submit button", "url": ""}
 
+        if Config.DRY_RUN:
+            logger.debug("DRY_RUN enabled — not submitting. Dumping artifacts...")
+            _dump_debug_artifacts(driver, logger, "before_submit_image")
+            return {"status": "Dry Run", "url": driver.current_url}
+
         logger.debug("Submitting image post...")
         driver.execute_script("arguments[0].click();", submit)
 
@@ -467,6 +604,8 @@ def _create_image_post(driver, img_url: str, caption: str,
         # If URL still looks like an upload page, check for error messages
         if "upload" in driver.current_url.lower():
             err_text = _extract_error_message(driver)
+            if Config.DEBUG:
+                _dump_debug_artifacts(driver, logger, "upload_error_image")
             return {"status": f"Upload Error: {err_text}", "url": driver.current_url}
 
         return {"status": "Pending Verification", "url": post_url}
@@ -474,6 +613,8 @@ def _create_image_post(driver, img_url: str, caption: str,
     except RuntimeError as e:
         return {"status": f"Image Download Failed: {str(e)[:60]}", "url": ""}
     except Exception as e:
+        if Config.DEBUG:
+            _dump_debug_artifacts(driver, logger, "exception_image")
         return {"status": f"Error: {str(e)[:60]}", "url": ""}
     finally:
         # Always clean up the temp file regardless of outcome
@@ -497,6 +638,10 @@ def _create_text_post(driver, content: str, logger: Logger) -> Dict:
     """
     try:
         driver.get(_URL_TEXT_SHARE)
+        time.sleep(1)
+        pre = _share_page_preflight(driver, logger, "/share/text")
+        if pre:
+            return pre
         time.sleep(3)
 
         form = _find_share_form(driver, require_file=False)
@@ -518,6 +663,11 @@ def _create_text_post(driver, content: str, logger: Logger) -> Dict:
 
         # -- Submit -----------------------------------------------------------
         submit = form.find_element(By.CSS_SELECTOR, _SEL_SUBMIT)
+        if Config.DRY_RUN:
+            logger.debug("DRY_RUN enabled — not submitting. Dumping artifacts...")
+            _dump_debug_artifacts(driver, logger, "before_submit_text")
+            return {"status": "Dry Run", "url": driver.current_url}
+
         driver.execute_script("arguments[0].click();", submit)
         try:
             WebDriverWait(driver, 10).until(
@@ -543,6 +693,8 @@ def _create_text_post(driver, content: str, logger: Logger) -> Dict:
         return {"status": "Pending Verification", "url": post_url}
 
     except Exception as e:
+        if Config.DEBUG:
+            _dump_debug_artifacts(driver, logger, "exception_text")
         return {"status": f"Error: {str(e)[:60]}", "url": ""}
 
 
@@ -612,20 +764,46 @@ def _detect_rate_limit(page_source: str) -> int:
     """
     Check page source for DamaDam's rate limit message.
     Returns estimated wait time in seconds, or 0 if no rate limit.
+
+    DamaDam may express rate limits in several ways:
+      - English: "wait 2 minutes", "please wait", "too many requests"
+      - Urdu/Roman-Urdu: "intezaar karein", "bahut zyada"
+      - HTTP 429 text in page body
+      - Generic throttle keywords
     """
     src = page_source.lower()
-    # DamaDam shows messages like "2 minute" or "130 second" wait
-    if "minute" in src and ("wait" in src or "please" in src or "karo" in src):
-        # Extract the number of minutes if present
+
+    # ── Timed messages: "2 minute" or "130 second" ───────────────────────────
+    if "minute" in src and ("wait" in src or "please" in src or "karo" in src or "intezaar" in src):
         m = re.search(r"(\d+)\s*minute", src)
         if m:
             return int(m.group(1)) * 60 + 15  # add buffer
         return Config.POST_COOLDOWN_SECONDS
-    if "second" in src and ("wait" in src or "please" in src):
+
+    if "second" in src and ("wait" in src or "please" in src or "ruko" in src):
         m = re.search(r"(\d+)\s*second", src)
         if m:
             return int(m.group(1)) + 10
         return Config.POST_COOLDOWN_SECONDS
+
+    # ── Generic rate-limit / throttle keywords ────────────────────────────────
+    rate_limit_phrases = [
+        "too many",           # "too many requests" / "too many posts"
+        "rate limit",         # explicit rate limit message
+        "429",                # HTTP 429 in page body
+        "slow down",          # "please slow down"
+        "throttl",            # "throttled" / "throttling"
+        "bahut zyada",        # Urdu: "too many"
+        "intezaar",           # Urdu: "wait" (intezaar karein)
+        "ruko",               # Urdu: "stop/wait"
+        "zyada post",         # Urdu: "too many posts"
+        "limit exceeded",     # generic limit message
+        "try again",          # "please try again later"
+    ]
+    for phrase in rate_limit_phrases:
+        if phrase in src:
+            return Config.POST_COOLDOWN_SECONDS
+
     return 0
 
 

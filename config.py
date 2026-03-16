@@ -34,6 +34,7 @@ class Config:
     # ── Browser ────────────────────────────────────────────────────────────────
     CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "").strip()
     HEADLESS          = os.getenv("DD_HEADLESS", "1").strip().lower() in {"1", "true", "yes"}
+    DISABLE_IMAGES    = os.getenv("DD_DISABLE_IMAGES", "1").strip().lower() in {"1", "true", "yes"}
     PAGE_LOAD_TIMEOUT = int(os.getenv("DD_PAGE_LOAD_TIMEOUT", "15") or "15")
 
     # ── Cookie file for session persistence ────────────────────────────────────

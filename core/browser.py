@@ -68,7 +68,8 @@ class BrowserManager:
             opts.add_argument("--disable-background-networking")
             opts.add_argument("--no-first-run")
             # Skip image loading — speeds up page loads significantly
-            opts.add_argument("--blink-settings=imagesEnabled=false")
+            if Config.DISABLE_IMAGES:
+                opts.add_argument("--blink-settings=imagesEnabled=false")
             # Eager = don't wait for all resources, just DOM ready
             opts.page_load_strategy = "eager"
 
@@ -99,10 +100,15 @@ class BrowserManager:
         """Safely shut down the WebDriver."""
         if self.driver:
             try:
-                self.driver.quit()
+                drv = self.driver
+                self.driver = None
+                try:
+                    drv.quit()
+                except Exception as e:
+                    self.log.debug(f"Browser quit error (ignored): {e}")
                 self.log.info("Browser closed")
             except Exception:
-                pass
+                self.driver = None
             self.driver = None
 
 

@@ -70,6 +70,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--headless", dest="headless", action="store_true", default=None,
         help="Force headless browser mode",
     )
+    p.add_argument(
+        "--stop-on-fail", dest="stop_on_fail", action="store_true",
+        help="Stop the run immediately after the first Failed/RateLimited post",
+    )
+    p.add_argument(
+        "--force-wait", dest="force_wait", type=int, metavar="SECONDS",
+        help="Force wait N seconds before starting (useful to bypass cooldowns)",
+    )
     return p
 
 
@@ -157,6 +165,9 @@ def _run_with_browser(mode: str, args) -> None:
     logger.section(f"DD-Msg-Bot V{Config.VERSION} — {mode.upper()} MODE")
     Config.validate()
 
+    if mode == "post":
+        Config.DISABLE_IMAGES = False
+
     bm     = BrowserManager(logger)
     driver = bm.start()
     if not driver:
@@ -181,7 +192,9 @@ def _run_with_browser(mode: str, args) -> None:
         if mode == "msg":
             message_mode.run(driver, sheets, logger, max_targets=max_n)
         elif mode == "post":
-            post_mode.run(driver, sheets, logger, max_posts=max_n)
+            post_mode.run(driver, sheets, logger, max_posts=max_n,
+                          stop_on_fail=getattr(args, "stop_on_fail", False),
+                          force_wait=getattr(args, "force_wait", None))
         elif mode == "rekhta":
             rekhta_mode.run(driver, sheets, logger, max_items=max_n)
         elif mode == "inbox":

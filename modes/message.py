@@ -311,7 +311,7 @@ def _verify_post_open(driver, post_url: str, logger: Logger) -> bool:
         if "comments are closed" in page or "comments closed" in page:
             return False
         # Must follow indicator
-        if "follow to reply" in page.upper():
+        if "FOLLOW TO REPLY" in page.upper():
             return False
         # Look for the actual reply form
         forms = driver.find_elements(By.CSS_SELECTOR, _SEL_REPLY_FORM)
