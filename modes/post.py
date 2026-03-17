@@ -562,9 +562,15 @@ def _create_image_post(driver, img_url: str, caption: str,
         # -- Verify post on profile if redirected -----------------------------
         if "/profile/public/" in driver.current_url or "/users/" in driver.current_url:
             logger.debug("Redirected to profile; verifying most recent post...")
-            # TODO: Add verification logic to check the most recent post content matches
-            # For now, assume success if we're on the profile page
-            return {"status": "Posted", "url": driver.current_url}
+            # Wait a moment for the new post to appear on the profile
+            time.sleep(3)
+            # Simple verification: check if page contains the caption text
+            if caption and caption.lower() in driver.page_source.lower():
+                logger.debug("Caption found on profile — post verified")
+                return {"status": "Posted", "url": driver.current_url}
+            else:
+                logger.warning("Caption not found on profile — post may not have appeared")
+                return {"status": "Pending Verification", "url": driver.current_url}
 
         # -- Detect rate limit or duplicate -----------------------------------
         page = driver.page_source.lower()
