@@ -333,53 +333,15 @@ def run(driver, sheets: SheetsManager, logger: Logger,
                     col_status: "Pending (RateLimited)",
                     col_notes:  f"Rate limited @ {pkt_stamp()}",
                 })
-                stats["skipped"] += 1
                 break
-
-            # Otherwise: wait then retry ONCE.
-            # Use whichever is LARGER: the page-detected wait, or 5 minutes minimum.
-            # DamaDam's actual cooldown is often 5-10 minutes — 2 minutes is not enough.
-            MIN_RATE_LIMIT_WAIT = 300  # 5 minutes minimum
-            wait = max(wait_s or 0, Config.POST_COOLDOWN_SECONDS, MIN_RATE_LIMIT_WAIT) + 30
-            logger.warning(f"Rate limited — waiting {wait}s ({wait//60:.0f}m {wait%60:.0f}s) then retrying once...")
-            time.sleep(wait)
-            if post_type == "image":
-                result2 = _create_image_post(driver, img_link, caption, logger)
-            else:
-                result2 = _create_text_post(driver, item["urdu"] or item["title"], logger)
-
-            if result2.get("status") == "Posted":
-                logger.ok(f"Retry succeeded: {result2['url']}")
-                sheets.update_row_cells(ws, row_num, {
-                    col_status:   "Done",
-                    col_post_url: result2["url"],
-                    col_notes:    f"Posted (retry) @ {pkt_stamp()}",
-                })
-                last_post_time = time.time()
-                stats["posted"] += 1
-            else:
-                st2 = result2.get("status", "Error")
-                if st2 == "Rate Limited":
-                    # Still rate limited after the extended wait — DamaDam is heavily throttling.
-                    # Leave the row as Pending and stop all further processing this run.
-                    # Do NOT mark as Failed — it will be retried next time the bot runs.
-                    logger.warning("Still rate limited after retry — DamaDam is throttling heavily. Stopping this run.")
-                    sheets.update_row_cells(ws, row_num, {
-                        col_status: "Pending (RateLimited)",
-                        col_notes:  f"Rate limited twice @ {pkt_stamp()}",
-                    })
-                    stats["skipped"] += 1
-                    break  # Stop all further posts — site is throttled, no point continuing
-                else:
-                    logger.error(f"Retry also failed: {st2}")
-                    sheets.update_row_cells(ws, row_num, {
-                        col_status: "Failed",
-                        col_notes:  f"Rate limited, retry: {st2}",
-                    })
-                    stats["failed"] += 1
-                    if stop_on_fail:
-                        logger.warning("Stop-on-fail enabled — stopping after failure")
-                        break
+            # For now, do not wait; mark as Failed and continue to avoid false waits
+            logger.warning("Rate limit detected. Marking as Failed to avoid long wait.")
+            sheets.update_row_cells(ws, row_num, {
+                col_status: "Failed",
+                col_notes:  "Rate limit detected",
+            })
+            stats["failed"] += 1
+            continue
 
         elif status == "Repeating":
             # DamaDam detected this as a duplicate image — do NOT retry
@@ -582,7 +544,7 @@ def _create_image_post(driver, img_url: str, caption: str,
         # -- Wait for redirect after submit -----------------------------------
         # DamaDam redirects to /comments/image/{id} on success
         try:
-            WebDriverWait(driver, 20).until(
+            WebDriverWait(driver, 30).until(
                 lambda d: (
                     "/comments/image/" in d.current_url
                     or "/content/" in d.current_url
@@ -591,6 +553,8 @@ def _create_image_post(driver, img_url: str, caption: str,
                 )
             )
         except TimeoutException:
+            # If redirect times out, still check for success via page content
+            logger.debug("Redirect timeout; checking page for success indicators...")
             pass
         time.sleep(2)
 
@@ -776,42 +740,12 @@ def _detect_rate_limit(page_source: str) -> int:
     Check page source for DamaDam's rate limit message.
     Returns estimated wait time in seconds, or 0 if no rate limit.
 
-    DamaDam may express rate limits in several ways:
-      - English: "wait 2 minutes", "please wait", "too many requests"
-      - Urdu/Roman-Urdu: "intezaar karein", "bahut zyada"
-      - HTTP 429 text in page body
-      - Generic throttle keywords
+    Ultra-conservative: only trigger on undeniable rate-limit pages.
     """
     src = page_source.lower()
 
-    # ── Timed messages: "2 minute" or "130 second" ───────────────────────────
-    if "minute" in src and ("wait" in src or "please" in src or "karo" in src or "intezaar" in src):
-        m = re.search(r"(\d+)\s*minute", src)
-        if m:
-            return int(m.group(1)) * 60 + 15  # add buffer
-        return Config.POST_COOLDOWN_SECONDS
-
-    if "second" in src and ("wait" in src or "please" in src or "ruko" in src):
-        m = re.search(r"(\d+)\s*second", src)
-        if m:
-            return int(m.group(1)) + 10
-        return Config.POST_COOLDOWN_SECONDS
-
-    # ── Generic rate-limit / throttle keywords ────────────────────────────────
-    rate_limit_phrases = [
-        "too many",           # "too many requests" / "too many posts"
-        "rate limit",         # explicit rate limit message
-        "429",                # HTTP 429 in page body
-        "slow down",          # "please slow down"
-        "throttl",            # "throttled" / "throttling"
-        "bahut zyada",        # Urdu: "too many"
-        "intezaar",           # Urdu: "wait" (intezaar karein)
-        "ruko",               # Urdu: "stop/wait"
-        "zyada post",         # Urdu: "too many posts"
-        "limit exceeded",     # generic limit message
-        "try again",          # "please try again later"
-    ]
-    for phrase in rate_limit_phrases:
+    # Only trigger on explicit rate-limit phrases
+    for phrase in ("rate limit", "rate limited", "rate-limit", "rate-limited"):
         if phrase in src:
             return Config.POST_COOLDOWN_SECONDS
 
