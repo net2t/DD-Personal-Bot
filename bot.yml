@@ -1,0 +1,103 @@
+name: DD-Msg-Bot
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'Mode to run'
+        required: true
+        default: 'post'
+        type: choice
+        options:
+          - rekhta
+          - msg
+          - post
+          - inbox
+          - activity
+          - logs
+          - setup
+          - format
+
+  schedule:
+    # Post — 1 image every hour (top of the hour)
+    - cron: '0 * * * *'
+    # Rekhta scraper — every 6 hours (keeps PostQueue filled)
+    - cron: '30 */6 * * *'
+    # Inbox + Activity — every 20 minutes
+    - cron: '5,25,45 * * * *'
+    # Message mode — once daily at 06:00 PKT (01:00 UTC)
+    - cron: '0 1 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Verify Chrome
+        run: google-chrome --version
+
+      - name: Write Google credentials
+        run: echo '${{ secrets.GOOGLE_CREDENTIALS_JSON }}' > credentials.json
+
+      - name: Determine mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "mode=${{ github.event.inputs.mode }}" >> $GITHUB_OUTPUT
+          else
+            MINUTE=$(date -u +%M | sed 's/^0*//')
+            HOUR=$(date -u +%H | sed 's/^0*//')
+            MINUTE=${MINUTE:-0}
+            HOUR=${HOUR:-0}
+
+            # Minute 0 of hour 1 UTC = msg (06:00 PKT daily)
+            if [ "$MINUTE" = "0" ] && [ "$HOUR" = "1" ]; then
+              echo "mode=msg" >> $GITHUB_OUTPUT
+            # Minute 30 of 0,6,12,18 UTC = rekhta
+            elif [ "$MINUTE" = "30" ]; then
+              echo "mode=rekhta" >> $GITHUB_OUTPUT
+            # Minute 0 = post (every hour)
+            elif [ "$MINUTE" = "0" ]; then
+              echo "mode=post" >> $GITHUB_OUTPUT
+            # Minutes 5, 25, 45 = inbox
+            else
+              echo "mode=inbox" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Run bot — ${{ steps.mode.outputs.mode }}
+        env:
+          DD_LOGIN_EMAIL:          ${{ secrets.DD_LOGIN_EMAIL }}
+          DD_LOGIN_PASS:           ${{ secrets.DD_LOGIN_PASS }}
+          DD_LOGIN_EMAIL2:         ${{ secrets.DD_LOGIN_EMAIL2 }}
+          DD_LOGIN_PASS2:          ${{ secrets.DD_LOGIN_PASS2 }}
+          DD_SHEET_ID:             ${{ secrets.DD_SHEET_ID }}
+          GOOGLE_CREDENTIALS_JSON: ${{ secrets.GOOGLE_CREDENTIALS_JSON }}
+          GEMINI_API_KEY:          ${{ secrets.GEMINI_API_KEY }}
+          DD_HEADLESS:             "1"
+          DD_DEBUG:                "0"
+        run: python main.py ${{ steps.mode.outputs.mode }} --max 1
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bot-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 3
