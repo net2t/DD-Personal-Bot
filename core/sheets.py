@@ -382,6 +382,79 @@ class SheetsManager:
             details,      # DETAILS
         ])
 
+    def log_run(self, mode: str, stats: dict, duration_s: float = 0.0, notes: str = ""):
+        """
+        Append one row to the RunLog sheet summarising a complete bot run.
+
+        Args:
+            mode:       Mode name (rekhta / msg / post / inbox / setup)
+            stats:      Dict with any of: added, posted, sent, failed, skipped
+            duration_s: Run duration in seconds
+            notes:      Optional extra info or error summary
+        """
+        ws = self.get_worksheet(Config.SHEET_RUN_LOG, headers=Config.RUN_LOG_COLS)
+        if not ws:
+            return
+        overall = "Done"
+        if stats.get("failed", 0) > 0 and not stats.get("posted", 0) and not stats.get("sent", 0):
+            overall = "Failed"
+        self.append_row(ws, [
+            pkt_stamp(),                       # TIMESTAMP
+            mode.upper(),                      # MODE
+            overall,                           # STATUS
+            str(stats.get("added",   "")),     # ADDED
+            str(stats.get("posted",  "")),     # POSTED
+            str(stats.get("sent",    "")),     # SENT
+            str(stats.get("failed",  "")),     # FAILED
+            str(stats.get("skipped", "")),     # SKIPPED
+            f"{duration_s:.0f}s",              # DURATION
+            notes[:200] if notes else "",      # NOTES
+        ])
+
+    # ════════════════════════════════════════════════════════════════════════════
+    #  ScrapeState — key/value pagination cursor store
+    # ════════════════════════════════════════════════════════════════════════════
+
+    def get_scrape_state(self, key: str) -> str:
+        """
+        Read a value from the ScrapeState sheet by key.
+        Returns the value string, or "" if not found.
+        """
+        try:
+            ws = self.get_worksheet(Config.SHEET_SCRAPE_STATE,
+                                    headers=Config.SCRAPE_STATE_COLS)
+            if not ws:
+                return ""
+            rows = ws.get_all_values()
+            for row in rows[1:]:  # skip header
+                if row and str(row[0]).strip() == key:
+                    return str(row[1]).strip() if len(row) > 1 else ""
+        except Exception as e:
+            self.log.debug(f"get_scrape_state({key}) error: {e}")
+        return ""
+
+    def set_scrape_state(self, key: str, value: str):
+        """
+        Write (or update) a key/value pair in the ScrapeState sheet.
+        If the key already exists, updates in-place.  Otherwise appends.
+        """
+        try:
+            ws = self.get_worksheet(Config.SHEET_SCRAPE_STATE,
+                                    headers=Config.SCRAPE_STATE_COLS)
+            if not ws:
+                return
+            rows = ws.get_all_values()
+            for i, row in enumerate(rows[1:], start=2):
+                if row and str(row[0]).strip() == key:
+                    ws.update(f"B{i}:C{i}", [[value, pkt_stamp()]])
+                    return
+            # Key not found — append new row
+            self.append_row(ws, [key, value, pkt_stamp()])
+        except Exception as e:
+            self.log.debug(f"set_scrape_state({key}) error: {e}")
+
+
+
     # ════════════════════════════════════════════════════════════════════════════
     #  Ensure headers are correct (used by Setup Mode)
     # ════════════════════════════════════════════════════════════════════════════

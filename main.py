@@ -53,10 +53,10 @@ def _build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument(
-        "mode", nargs="?",  # Optional — if missing, we show interactive menu
+        "mode", nargs="?",
         choices=["msg", "post", "rekhta", "inbox", "activity",
                  "logs", "setup", "format"],
-        help="Which mode to run (omit for interactive menu)",
+        help="Which mode to run (omit for interactive menu). 'activity' is an alias for 'inbox'.",
     )
     p.add_argument(
         "--max", dest="max_items", type=int, default=0, metavar="N",
@@ -119,16 +119,15 @@ def _interactive_menu() -> tuple:
             "1": "rekhta",
             "2": "msg",
             "3": "post",
-            "4": "inbox",
-            "5": "activity",
-            "6": "logs",
-            "7a": "setup",
-            "7b": "format",
+            "4": "inbox",    # Inbox + Activity combined
+            "5": "logs",
+            "6a": "setup",
+            "6b": "format",
             "0": None,
         }
 
         if raw not in mode_map:
-            print("  ⚠  Invalid choice — enter 1–7b or 0 to exit.\n")
+            print("  ⚠  Invalid choice — enter 1–5, 6a, 6b or 0 to exit.\n")
             continue
 
         mode = mode_map[raw]
@@ -140,16 +139,12 @@ def _interactive_menu() -> tuple:
         max_items = 0
         if mode in ("rekhta", "msg", "post"):
             limit_raw = input(
-                f"  Max items to process? (press Enter for unlimited): "
+                f"  Max items to process? (Enter for unlimited, 0=unlimited): "
             ).strip()
             if limit_raw.isdigit():
                 max_items = int(limit_raw)
 
-        # Debug toggle
-        debug_raw = input("  Enable debug logging? (y/N): ").strip().lower()
-        debug = debug_raw in ("y", "yes")
-
-        return mode, max_items, debug
+        return mode, max_items, False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -199,8 +194,8 @@ def _run_with_browser(mode: str, args) -> None:
             rekhta_mode.run(driver, sheets, logger, max_items=max_n)
         elif mode == "inbox":
             inbox_mode.run_inbox(driver, sheets, logger)
-        elif mode == "activity":
-            inbox_mode.run_activity(driver, sheets, logger)
+        elif mode == "activity":  # backwards-compat alias
+            inbox_mode.run_inbox(driver, sheets, logger)
 
     finally:
         bm.close()

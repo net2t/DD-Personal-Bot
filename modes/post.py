@@ -122,6 +122,9 @@ def run(driver, sheets: SheetsManager, logger: Logger,
     Returns:
         Stats dict: {posted, skipped, failed, total}
     """
+    import time as _time
+    run_start = _time.time()
+
     logger.section("POST MODE")
 
     # ── Load PostQueue sheet ──────────────────────────────────────────────────
@@ -399,9 +402,16 @@ def run(driver, sheets: SheetsManager, logger: Logger,
                 logger.warning("Stop-on-fail enabled — stopping after failure")
                 break
 
+    duration = _time.time() - run_start
     logger.section(
         f"POST MODE DONE — Posted:{stats['posted']}  "
         f"Skipped:{stats['skipped']}  Failed:{stats['failed']}"
+    )
+    sheets.log_run(
+        "post",
+        {"posted": stats["posted"], "failed": stats["failed"], "skipped": stats["skipped"]},
+        duration_s=duration,
+        notes=f"{stats['posted']}/{stats['total']} posts published",
     )
     return stats
 

@@ -35,7 +35,7 @@ class Config:
     CHROMEDRIVER_PATH = os.getenv("CHROMEDRIVER_PATH", "").strip()
     HEADLESS          = os.getenv("DD_HEADLESS", "1").strip().lower() in {"1", "true", "yes"}
     DISABLE_IMAGES    = os.getenv("DD_DISABLE_IMAGES", "1").strip().lower() in {"1", "true", "yes"}
-    PAGE_LOAD_TIMEOUT = int(os.getenv("DD_PAGE_LOAD_TIMEOUT", "15") or "15")
+    PAGE_LOAD_TIMEOUT = int(os.getenv("DD_PAGE_LOAD_TIMEOUT", "60") or "60")
 
     # ── Cookie file for session persistence ────────────────────────────────────
     COOKIE_FILE = str(SCRIPT_DIR / "damadam_cookies.pkl")
@@ -97,11 +97,16 @@ class Config:
     # Master log    — one row per any action across all modes
     SHEET_LOGS      = "Logs"
 
+    # Run log       — one row per bot run (mode, counts, duration)
+    SHEET_RUN_LOG   = "RunLog"
+
+    # Scrape state  — pagination cursor so Mode 1 resumes instead of re-scanning
+    SHEET_SCRAPE_STATE = "ScrapeState"
+
     # Dashboard     — summary/analysis (formulas only, bot never writes here)
     SHEET_DASHBOARD = "Dashboard"
 
     # ── Keep old names as aliases so existing code doesn't break ──────────────
-    # (removed after full migration is done)
     SHEET_MASTER_LOG = SHEET_LOGS          # backwards compat alias
     SHEET_MSG_LIST   = SHEET_MSG_QUE       # backwards compat alias
     SHEET_POST_QUEUE = SHEET_POST_QUE      # backwards compat alias
@@ -205,6 +210,27 @@ class Config:
         "DETAILS",    # G
     ]
 
+    # ── RunLog — one row per complete bot run ─────────────────────────────────
+    RUN_LOG_COLS = [
+        "TIMESTAMP",  # A  When the run started (PKT)
+        "MODE",       # B  Which mode was run (rekhta/msg/post/inbox/setup)
+        "STATUS",     # C  Done / Failed / Stopped
+        "ADDED",      # D  Items added    (Rekhta: new rows in PostQue)
+        "POSTED",     # E  Posts created  (Post mode)
+        "SENT",       # F  Messages sent  (Msg / Inbox reply)
+        "FAILED",     # G  Failures
+        "SKIPPED",    # H  Skipped rows
+        "DURATION",   # I  How long the run took (seconds)
+        "NOTES",      # J  Extra info or error summary
+    ]
+
+    # ── ScrapeState — key/value store for pagination cursors ──────────────────
+    SCRAPE_STATE_COLS = [
+        "KEY",        # A  State key (e.g. "rekhta_last_page")
+        "VALUE",      # B  State value
+        "UPDATED",    # C  When this value was last written
+    ]
+
     # ── Backwards compat aliases for column lists ──────────────────────────────
     MSG_LIST_COLS   = MSG_QUE_COLS
     POST_QUEUE_COLS = POST_QUE_COLS
@@ -215,13 +241,15 @@ class Config:
     #  All sheets in setup order
     # ════════════════════════════════════════════════════════════════════════════
     ALL_SHEETS = {
-        SHEET_MSG_QUE:   MSG_QUE_COLS,
-        SHEET_POST_QUE:  POST_QUE_COLS,
-        SHEET_INBOX_QUE: INBOX_QUE_COLS,
-        SHEET_MSG_LOG:   MSG_LOG_COLS,
-        SHEET_POST_LOG:  POST_LOG_COLS,
-        SHEET_INBOX_LOG: INBOX_LOG_COLS,
-        SHEET_LOGS:      LOGS_COLS,
+        SHEET_MSG_QUE:      MSG_QUE_COLS,
+        SHEET_POST_QUE:     POST_QUE_COLS,
+        SHEET_INBOX_QUE:    INBOX_QUE_COLS,
+        SHEET_MSG_LOG:      MSG_LOG_COLS,
+        SHEET_POST_LOG:     POST_LOG_COLS,
+        SHEET_INBOX_LOG:    INBOX_LOG_COLS,
+        SHEET_LOGS:         LOGS_COLS,
+        SHEET_RUN_LOG:      RUN_LOG_COLS,
+        SHEET_SCRAPE_STATE: SCRAPE_STATE_COLS,
         # Dashboard has no fixed columns — it's formula-based, created empty
     }
 
