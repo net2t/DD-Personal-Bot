@@ -436,14 +436,15 @@ def _create_image_post(driver, img_url: str, caption: str, logger: Logger) -> Di
 
         # ── Step 6: Set radio options ─────────────────────────────────────────
         #   exp=i  → Never expire post    → click label[for='exp-first']
-        #   com=1  → Turn Off Replies Yes → click label[for='com-on']
+        #   com-off → Turn Off Replies: Yes (label says 'Yes', id='com-off', value='0')
+        #   NOTE: com-on(value=1)=label 'No', com-off(value=0)=label 'Yes' — confusing but confirmed
         #
         # DamaDam uses hidden radio inputs (class="checkbox", opacity:0)
         # with visible <label for="..."> elements styled via CSS.
         # Clicking the hidden input does nothing — must click the label.
         # Label IDs confirmed from HTML dump of the upload page.
         _click_radio_label(driver, logger, "exp-first", "Never expire post")
-        _click_radio_label(driver, logger, "com-on",    "Turn Off Replies: Yes")
+        _click_radio_label(driver, logger, "com-off",   "Turn Off Replies: Yes")
         _dump(driver, logger, "03_before_submit")
 
         # ── Step 7: Find and click submit ─────────────────────────────────────
@@ -559,7 +560,7 @@ def _create_text_post(driver, content: str, logger: Logger) -> Dict:
             return {"status": "Text form: textarea not found", "url": driver.current_url}
 
         _click_radio_label(driver, logger, "exp-first", "Never expire post")
-        _click_radio_label(driver, logger, "com-on",    "Turn Off Replies: Yes")
+        _click_radio_label(driver, logger, "com-off",   "Turn Off Replies: Yes")
 
         _dump(driver, logger, "02_text_before_submit")
 
@@ -756,7 +757,7 @@ def _click_radio_label(driver, logger: Logger, label_for: str, description: str 
 
     Args:
         label_for:   The 'for' attribute value of the label (= radio input id)
-                     e.g. "exp-first" for Never expire, "com-on" for Turn Off Replies Yes
+                     e.g. "exp-first" for Never expire, "com-off" for Turn Off Replies Yes
         description: Human-readable name for logging
     """
     try:
